@@ -19,13 +19,16 @@
 #ifndef TMUX_H
 #define TMUX_H
 
+#ifdef _WIN32
+#include <stdarg.h>
+#else
 #include <sys/time.h>
 #include <sys/uio.h>
+#include <termios.h>
+#endif
 
 #include <limits.h>
-#include <stdarg.h>
 #include <stdio.h>
-#include <termios.h>
 #include <wchar.h>
 
 #ifdef HAVE_UTEMPTER
@@ -94,7 +97,11 @@ struct winlink;
 #define TMUX_SOCK_PERM (7 /* o+rwx */)
 #endif
 #ifndef TMUX_TERM
+#ifdef _WIN32
+#define TMUX_TERM "xterm-256color"
+#else
 #define TMUX_TERM "screen"
+#endif
 #endif
 #ifndef TMUX_LOCK_CMD
 #define TMUX_LOCK_CMD "lock -np"
@@ -155,13 +162,24 @@ struct winlink;
 #define KEYC_SENT	     0x40000000000000ULL
 
 /* Masks for key bits. */
+#ifdef _MSC_VER
+#define KEYC_MASK_TYPE       0x000000ff000000ULL
+#define KEYC_MASK_MODIFIERS  0x00ff0000000000ULL
+#define KEYC_MASK_FLAGS      0xff000000000000ULL
+#define KEYC_MASK_KEY        0x00000000ffffffULL
+#else
 #define KEYC_MASK_TYPE       0x0000ff00000000ULL
 #define KEYC_MASK_MODIFIERS  0x00ff0000000000ULL
 #define KEYC_MASK_FLAGS      0xff000000000000ULL
 #define KEYC_MASK_KEY        0x0000ffffffffffULL
+#endif
 
 #define KEYC_NUSER           1000
+#ifdef _MSC_VER
+#define KEYC_SHIFT_TYPE(t)   ((unsigned long long)(t) << 24)
+#else
 #define KEYC_SHIFT_TYPE(t)   ((unsigned long long)(t) << 32)
+#endif
 #define KEYC_IS_TYPE(k, t)   (((k) & KEYC_MASK_TYPE) == KEYC_SHIFT_TYPE(t))
 enum key_code_type {
 	KEYC_TYPE_UNICODE,
@@ -1325,6 +1343,10 @@ struct window_pane {
 
 	struct input_ctx *ictx;
 
+#ifdef _WIN32
+	void		*win32_pty; /* struct win32_pty * */
+#endif
+
 	struct grid_cell cached_gc;
 	struct grid_cell cached_active_gc;
 	u_int		 cached_dim;
@@ -2179,6 +2201,11 @@ struct client {
 	u_int			 term_ncaps;
 
 	char			*ttyname;
+	char			*tty_token;
+#ifdef _WIN32
+	struct event		 tty_wait_timer;
+	struct cmdq_item	*tty_wait_item;
+#endif
 	struct tty		 tty;
 
 	size_t			 written;
@@ -2517,6 +2544,7 @@ void	proc_toggle_log(struct tmuxproc *);
 pid_t	proc_fork_and_daemon(int *);
 uid_t	proc_get_peer_uid(struct tmuxpeer *);
 gid_t	proc_get_peer_gid(struct tmuxpeer *);
+int	proc_peer_fd(struct tmuxpeer *);
 
 /* cfg.c */
 extern int cfg_finished;
@@ -3145,6 +3173,10 @@ void	 server_update_socket(void);
 void	 server_add_accept(int);
 void printflike(1, 2) server_add_message(const char *, ...);
 int	 server_create_socket(uint64_t, char **);
+#ifdef _WIN32
+void	 server_add_pending_tty(const char *, int);
+int	 server_get_pending_tty(const char *);
+#endif
 
 /* server-client.c */
 RB_PROTOTYPE(client_windows, client_window, entry, server_client_window_cmp);

@@ -39,6 +39,7 @@ enum msgtype {
 	MSG_IDENTIFY_STDOUT,
 	MSG_IDENTIFY_LONGFLAGS,
 	MSG_IDENTIFY_TERMINFO,
+	MSG_IDENTIFY_TTYTOKEN,
 
 	MSG_COMMAND = 200,
 	MSG_DETACH,
@@ -67,7 +68,13 @@ enum msgtype {
 	MSG_WRITE,
 	MSG_WRITE_READY,
 	MSG_WRITE_CLOSE,
-	MSG_READ_CANCEL
+	MSG_READ_CANCEL,
+
+#ifdef _WIN32
+	MSG_WIN32_TTY_INPUT = 400,
+	MSG_WIN32_TTY_OUTPUT,
+	MSG_WIN32_TTY_RESIZE,
+#endif
 };
 
 /*
@@ -75,6 +82,11 @@ enum msgtype {
  *
  * Don't forget to bump PROTOCOL_VERSION if any of these change!
  */
+struct msg_resize_data {
+	u_int	sx;
+	u_int	sy;
+};
+
 struct msg_command {
 	int	argc;
 }; /* followed by packed argv */

@@ -17,19 +17,22 @@
  */
 
 #include <sys/types.h>
+#ifndef _WIN32
 #include <sys/ioctl.h>
-
 #include <netinet/in.h>
-
 #include <curses.h>
+#include <resolv.h>
+#include <termios.h>
+#endif
+
 #include <errno.h>
 #include <fcntl.h>
-#include <resolv.h>
 #include <stdlib.h>
 #include <string.h>
-#include <termios.h>
 #include <time.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #include "tmux.h"
 
@@ -104,8 +107,10 @@ tty_create_log(void)
 int
 tty_init(struct tty *tty, struct client *c)
 {
+#ifndef _WIN32
 	if (!isatty(c->fd))
 		return (-1);
+#endif
 
 	memset(tty, 0, sizeof *tty);
 	tty->client = c;
@@ -115,14 +120,25 @@ tty_init(struct tty *tty, struct client *c)
 	tty->fg = tty->bg = -1;
 	tty->mouse_last_pane = -1;
 
+#ifndef _WIN32
 	if (tcgetattr(c->fd, &tty->tio) != 0)
 		return (-1);
+#endif
 	return (0);
 }
 
 void
 tty_resize(struct tty *tty)
 {
+#ifdef _WIN32
+	/*
+	 * On Windows, the server is a detached process with no console.
+	 * It cannot query the client's terminal size via GetStdHandle().
+	 * The client sends its dimensions via MSG_RESIZE, which are applied
+	 * directly via tty_set_size() in the MSG_RESIZE handler.
+	 */
+	return;
+#else
 	struct client	*c = tty->client;
 	struct winsize	 ws;
 	u_int		 sx, sy, xpixel, ypixel;
@@ -158,6 +174,7 @@ tty_resize(struct tty *tty)
 	    xpixel, ypixel);
 	tty_set_size(tty, sx, sy, xpixel, ypixel);
 	tty_invalidate(tty);
+#endif
 }
 
 void
@@ -177,6 +194,9 @@ tty_read_callback(__unused int fd, __unused short events, void *data)
 	const char	*name = c->name;
 	size_t		 size = EVBUFFER_LENGTH(tty->in);
 	int		 nread;
+
+	if (c->flags & CLIENT_DEAD)
+		return;
 
 	nread = evbuffer_read(tty->in, c->fd, -1);
 	if (nread == 0 || nread == -1) {
@@ -337,11 +357,16 @@ void
 tty_start_tty(struct tty *tty)
 {
 	struct client	*c = tty->client;
+#ifndef _WIN32
 	struct termios	 tio;
+#endif
 
 	setblocking(c->fd, 0);
 	event_add(&tty->event_in, NULL);
 
+#ifdef _WIN32
+	win32_tty_raw_mode();
+#else
 	memcpy(&tio, &tty->tio, sizeof tio);
 	tio.c_iflag &= ~(IXON|IXOFF|ICRNL|INLCR|IGNCR|IMAXBEL|ISTRIP);
 	tio.c_iflag |= IGNBRK;
@@ -352,6 +377,7 @@ tty_start_tty(struct tty *tty)
 	tio.c_cc[VTIME] = 0;
 	if (tcsetattr(c->fd, TCSANOW, &tio) == 0)
 		tcflush(c->fd, TCOFLUSH);
+#endif
 
 	tty_putcode(tty, TTYC_SMCUP);
 
@@ -440,7 +466,9 @@ void
 tty_stop_tty(struct tty *tty)
 {
 	struct client	*c = tty->client;
+#ifndef _WIN32
 	struct winsize	 ws;
+#endif
 
 	if (!(tty->flags & TTY_STARTED))
 		return;
@@ -460,12 +488,16 @@ tty_stop_tty(struct tty *tty)
 	 * because the fd is invalid. Things like ssh -t can easily leave us
 	 * with a dead tty.
 	 */
+#ifdef _WIN32
+	win32_tty_restore();
+	tty_raw(tty, tty_term_string_ii(tty->term, TTYC_CSR, 0, tty->sy - 1));
+#else
 	if (ioctl(c->fd, TIOCGWINSZ, &ws) == -1)
 		return;
 	if (tcsetattr(c->fd, TCSANOW, &tty->tio) == -1)
 		return;
-
 	tty_raw(tty, tty_term_string_ii(tty->term, TTYC_CSR, 0, ws.ws_row - 1));
+#endif
 	if (tty_acs_needed(tty))
 		tty_raw(tty, tty_term_string(tty->term, TTYC_RMACS));
 	tty_raw(tty, tty_term_string(tty->term, TTYC_SGR0));
@@ -564,16 +596,38 @@ tty_raw(struct tty *tty, const char *s)
 	ssize_t		 n, slen;
 	u_int		 i;
 
+	if (c->fd == -1)
+		return;
+
 	slen = strlen(s);
 	for (i = 0; i < 5; i++) {
+#ifdef _WIN32
+		/*
+		 * On Windows, c->fd is a Winsock socket (the tty channel).
+		 * Must use send() instead of write() which maps to _write()
+		 * and would invoke the CRT invalid parameter handler on a
+		 * non-CRT fd, calling abort().
+		 */
+		n = send((SOCKET)c->fd, s, slen, 0);
+		if (n == SOCKET_ERROR) {
+			if (WSAGetLastError() == WSAEWOULDBLOCK)
+				;  /* retry */
+			else
+				break;
+		} else {
+#else
 		n = write(c->fd, s, slen);
 		if (n >= 0) {
+#endif
 			s += n;
 			slen -= n;
 			if (slen == 0)
 				break;
-		} else if (n == -1 && errno != EAGAIN)
+		}
+#ifndef _WIN32
+		else if (n == -1 && errno != EAGAIN)
 			break;
+#endif
 		usleep(100);
 	}
 }

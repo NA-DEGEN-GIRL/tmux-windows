@@ -18,15 +18,17 @@
 
 #include <sys/types.h>
 
+#ifndef _WIN32
 #if defined(HAVE_CURSES_H)
 #include <curses.h>
 #elif defined(HAVE_NCURSES_H)
 #include <ncurses.h>
 #endif
 #include <fnmatch.h>
+#include <term.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
-#include <term.h>
 
 #include "tmux.h"
 
@@ -595,15 +597,21 @@ tty_term_create(struct tty *tty, char *name, char **caps, u_int ncaps,
 
 		offset = 0;
 		first = tty_term_override_next(s, &offset);
+#ifdef _WIN32
+		if (first != NULL && strstr(term->name, first) != NULL)
+#else
 		if (first != NULL && fnmatch(first, term->name, 0) == 0)
+#endif
 			tty_add_features(feat, s + offset, ":");
 		a = options_array_next(a);
 	}
 
+#ifndef _WIN32
 	/* Delete curses data. */
 #if !defined(NCURSES_VERSION_MAJOR) || NCURSES_VERSION_MAJOR > 5 || \
     (NCURSES_VERSION_MAJOR == 5 && NCURSES_VERSION_MINOR > 6)
 	del_curterm(cur_term);
+#endif
 #endif
 	/* Check for COLORTERM. */
 	envent = environ_find(tty->client->environ, "COLORTERM");
@@ -615,6 +623,17 @@ tty_term_create(struct tty *tty, char *name, char **caps, u_int ncaps,
  		else if (strstr(envent->value, "256") != NULL)
 			tty_add_features(feat, "256", ",");
 	}
+
+#ifdef _WIN32
+	/*
+	 * Windows Terminal and modern conhost always support 256 and RGB
+	 * colours via VT sequences. DA probe responses may not arrive in
+	 * time (the tty relay starts after the queries are sent), and
+	 * COLORTERM is not always set in the client environment, so
+	 * unconditionally enable these features.
+	 */
+	tty_add_features(feat, "256,RGB", ",");
+#endif
 
 	/* Apply overrides so any capabilities used for features are changed. */
 	tty_term_apply_overrides(term);
@@ -690,6 +709,38 @@ int
 tty_term_read_list(const char *name, int fd, char ***caps, u_int *ncaps,
     char **cause)
 {
+#ifdef _WIN32
+	const struct win32_terminfo_entry	*table;
+	u_int					 count, i;
+
+	/* Use hardcoded xterm-256color capabilities on Windows. */
+	table = win32_terminfo_table(&count);
+
+	*ncaps = 0;
+	*caps = NULL;
+
+	for (i = 0; i < count; i++) {
+		*caps = xreallocarray(*caps, (*ncaps) + 1, sizeof **caps);
+		switch (table[i].type) {
+		case 1: /* string */
+			xasprintf(&(*caps)[*ncaps], "%s=%s", table[i].name,
+			    table[i].value != NULL ? table[i].value : "");
+			break;
+		case 2: /* number */
+			xasprintf(&(*caps)[*ncaps], "%s=%d", table[i].name,
+			    table[i].numeric);
+			break;
+		case 3: /* flag */
+			xasprintf(&(*caps)[*ncaps], "%s=%d", table[i].name,
+			    table[i].flag);
+			break;
+		default:
+			continue;
+		}
+		(*ncaps)++;
+	}
+	return (0);
+#else
 	const struct tty_term_code_entry	*ent;
 	int					 error, n;
 	u_int					 i;
@@ -758,6 +809,7 @@ tty_term_read_list(const char *name, int fd, char ***caps, u_int *ncaps,
 	del_curterm(cur_term);
 #endif
 	return (0);
+#endif /* _WIN32 */
 }
 
 void

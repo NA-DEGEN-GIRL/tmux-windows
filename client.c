@@ -17,18 +17,24 @@
  */
 
 #include <sys/types.h>
+#ifndef _WIN32
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <sys/file.h>
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
+#ifndef _WIN32
 #include <signal.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #include "tmux.h"
 
@@ -36,6 +42,12 @@ static struct tmuxproc	*client_proc;
 static struct tmuxpeer	*client_peer;
 static uint64_t		 client_flags;
 static int		 client_suspended;
+#ifdef _WIN32
+static int		 client_tty_fd = -1;
+static struct event	 client_tty_event;
+static HANDLE		 client_stdin_thread_h = NULL;
+static volatile int	 client_tty_running = 0;
+#endif
 static enum {
 	CLIENT_EXIT_NONE,
 	CLIENT_EXIT_DETACHED,
@@ -68,6 +80,10 @@ static void		 client_dispatch(struct imsg *, void *);
 static void		 client_dispatch_attached(struct imsg *);
 static void		 client_dispatch_wait(struct imsg *);
 static const char	*client_exit_message(void);
+#ifdef _WIN32
+static void		 client_start_tty_relay(void);
+static void		 client_stop_tty_relay(void);
+#endif
 
 /*
  * Get server create lock. If already held then server start is happening in
@@ -104,6 +120,59 @@ client_get_lock(char *lockfile)
 static int
 client_connect(struct event_base *base, const char *path, uint64_t flags)
 {
+#ifdef _WIN32
+	int	fd;
+
+	log_debug("connecting to server label %s", path);
+
+	fd = win32_ipc_connect(path);
+	if (fd != -1) {
+		setblocking(fd, 0);
+		return (fd);
+	}
+
+	log_debug("connect failed, starting server");
+
+	if (flags & CLIENT_NOSTARTSERVER)
+		return (-1);
+	if (~flags & CLIENT_STARTSERVER)
+		return (-1);
+
+	if (flags & CLIENT_NOFORK) {
+		/*
+		 * This process IS the server (launched with -D).
+		 * Call server_start() inline; it enters the event loop
+		 * and never returns for CLIENT_NOFORK.
+		 */
+		fd = server_start(client_proc, flags, base, -1, NULL);
+		setblocking(fd, 0);
+		return (fd);
+	}
+
+	/*
+	 * Launch a detached server process and poll for its named
+	 * pipe to appear. Once the pipe exists, WaitNamedPipe handles
+	 * the "busy" case internally.
+	 */
+	win32_launch_server(path);
+	{
+		int	retries;
+
+		for (retries = 0; retries < 50; retries++) {
+			Sleep(100);
+			fd = win32_ipc_connect(path);
+			if (fd != -1) {
+				log_debug("server connected after %d retries",
+				    retries + 1);
+				setblocking(fd, 0);
+				return (fd);
+			}
+		}
+	}
+
+	log_debug("server did not start in time");
+	return (-1);
+#else
 	struct sockaddr_un	sa;
 	size_t			size;
 	int			fd, lockfd = -1, locked = 0;
@@ -178,6 +247,7 @@ failed:
 	}
 	close(fd);
 	return (-1);
+#endif
 }
 
 /* Get exit string from reason number. */
@@ -302,11 +372,19 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 
 	/* Save these before pledge(). */
 	if ((cwd = find_cwd()) == NULL && (cwd = find_home()) == NULL)
+#ifdef _WIN32
+		cwd = "C:\\";
+#else
 		cwd = "/";
+#endif
 	if ((ttynam = ttyname(STDIN_FILENO)) == NULL)
 		ttynam = "";
 	if ((termname = getenv("TERM")) == NULL)
+#ifdef _WIN32
+		termname = "xterm-256color";
+#else
 		termname = "";
+#endif
 
 	/*
 	 * Drop privileges for client. "proc exec" is needed for -c and for
@@ -400,6 +478,11 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	/* Start main loop. */
 	proc_loop(client_proc, NULL);
 
+#ifdef _WIN32
+	/* Stop tty relay and restore console. */
+	client_stop_tty_relay();
+#endif
+
 	/* Run command if user requested exec, instead of exiting. */
 	if (client_exittype == MSG_EXEC) {
 		if (client_flags & CLIENT_CONTROLCONTROL)
@@ -427,7 +510,11 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 			printf("%%exit\n");
 		fflush(stdout);
 		if (client_flags & CLIENT_CONTROL_WAITEXIT) {
+#ifdef _WIN32
+			setvbuf(stdin, NULL, _IOLBF, BUFSIZ);
+#else
 			setvbuf(stdin, NULL, _IOLBF, 0);
+#endif
 			for (;;) {
 				linelen = getline(&line, &linesize, stdin);
 				if (linelen <= 1)
@@ -456,6 +543,23 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 	uint64_t  flags = client_flags;
 	pid_t	  pid;
 	u_int	  i;
+#ifdef _WIN32
+	char	  tty_token[65] = "";
+#endif
+
+#ifdef _WIN32
+	/*
+	 * Connect TTY channel early (before sending identify messages) to
+	 * give the server maximum time to accept() it. The named pipe has
+	 * nMaxInstances=1, so this second connection must wait for the pipe
+	 * thread's disconnect/reconnect cycle — doing it first minimizes the
+	 * chance the server processes MSG_IDENTIFY_DONE before accepting the
+	 * TTY channel.
+	 */
+	win32_generate_tty_token(tty_token, sizeof tty_token);
+	if (tty_token[0] != '\0')
+		client_tty_fd = win32_ipc_connect_tty(socket_path, tty_token);
+#endif
 
 	proc_send(client_peer, MSG_IDENTIFY_LONGFLAGS, -1, &flags, sizeof flags);
 	proc_send(client_peer, MSG_IDENTIFY_LONGFLAGS, -1, &client_flags,
@@ -474,12 +578,21 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 		    caps[i], strlen(caps[i]) + 1);
 	}
 
+#ifdef _WIN32
+	proc_send(client_peer, MSG_IDENTIFY_STDIN, -1, NULL, 0);
+	proc_send(client_peer, MSG_IDENTIFY_STDOUT, -1, NULL, 0);
+	if (client_tty_fd != -1) {
+		proc_send(client_peer, MSG_IDENTIFY_TTYTOKEN, -1,
+		    tty_token, strlen(tty_token) + 1);
+	}
+#else
 	if ((fd = dup(STDIN_FILENO)) == -1)
 		fatal("dup failed");
 	proc_send(client_peer, MSG_IDENTIFY_STDIN, fd, NULL, 0);
 	if ((fd = dup(STDOUT_FILENO)) == -1)
 		fatal("dup failed");
 	proc_send(client_peer, MSG_IDENTIFY_STDOUT, fd, NULL, 0);
+#endif
 
 	pid = getpid();
 	proc_send(client_peer, MSG_IDENTIFY_CLIENTPID, -1, &pid, sizeof pid);
@@ -492,12 +605,39 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 	}
 
 	proc_send(client_peer, MSG_IDENTIFY_DONE, -1, NULL, 0);
+
+#ifdef _WIN32
+	/*
+	 * Send initial window size from the client's console. The server
+	 * is a detached process with no console, so it cannot detect the
+	 * client's terminal dimensions on its own.
+	 */
+	{
+		struct msg_resize_data	rd;
+		int			cols = 80, rows = 24;
+
+		win32_tty_get_size(&cols, &rows);
+		rd.sx = cols;
+		rd.sy = rows;
+		proc_send(client_peer, MSG_RESIZE, -1, &rd, sizeof rd);
+	}
+#endif
 }
 
 /* Run command in shell; used for -c. */
 static __dead void
 client_exec(const char *shell, const char *shellcmd)
 {
+#ifdef _WIN32
+	char cmd[32768];
+
+	log_debug("shell %s, command %s", shell, shellcmd);
+	proc_clear_signals(client_proc, 1);
+
+	snprintf(cmd, sizeof cmd, "\"%s\" /c %s", shell, shellcmd);
+	system(cmd);
+	exit(0);
+#else
 	char	*argv0;
 
 	log_debug("shell %s, command %s", shell, shellcmd);
@@ -513,18 +653,119 @@ client_exec(const char *shell, const char *shellcmd)
 
 	execl(shell, argv0, "-c", shellcmd, (char *) NULL);
 	fatal("execl failed");
+#endif
 }
+
+#ifdef _WIN32
+/*
+ * Tty relay: read from tty socket, write to console stdout.
+ * This is the libevent callback fired when the server sends tty output.
+ */
+static void
+client_tty_read_cb(int fd, __unused short events, __unused void *arg)
+{
+	char	buf[8192];
+	int	n;
+	DWORD	written;
+
+	n = recv((SOCKET)fd, buf, sizeof buf, 0);
+	if (n <= 0) {
+		event_del(&client_tty_event);
+		return;
+	}
+	WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), buf, n, &written, NULL);
+}
+
+/*
+ * Tty relay: read from console stdin, write to tty socket.
+ * Runs in a separate thread since ReadFile on console blocks.
+ */
+static DWORD WINAPI
+client_stdin_thread_func(LPVOID arg)
+{
+	int	fd = (int)(intptr_t)arg;
+	HANDLE	h = GetStdHandle(STD_INPUT_HANDLE);
+	char	buf[8192];
+	DWORD	nread;
+
+	while (client_tty_running) {
+		if (!ReadFile(h, buf, sizeof buf, &nread, NULL) || nread == 0)
+			break;
+		if (send((SOCKET)fd, buf, (int)nread, 0) <= 0)
+			break;
+	}
+	return (0);
+}
+
+/*
+ * Start the tty relay after the client becomes attached.
+ */
+static void
+client_start_tty_relay(void)
+{
+	if (client_tty_fd == -1)
+		return;
+
+	/* Set console to raw VT mode. */
+	win32_tty_raw_mode();
+
+	/* Set tty socket to non-blocking for libevent. */
+	setblocking(client_tty_fd, 0);
+
+	/* Register tty socket for reading. */
+	event_set(&client_tty_event, client_tty_fd,
+	    EV_READ|EV_PERSIST, client_tty_read_cb, NULL);
+	event_add(&client_tty_event, NULL);
+
+	/* Start stdin reader thread. */
+	client_tty_running = 1;
+	client_stdin_thread_h = CreateThread(NULL, 0,
+	    client_stdin_thread_func, (LPVOID)(intptr_t)client_tty_fd,
+	    0, NULL);
+}
+
+/*
+ * Stop the tty relay on detach/exit.
+ */
+static void
+client_stop_tty_relay(void)
+{
+	client_tty_running = 0;
+
+	if (event_initialized(&client_tty_event))
+		event_del(&client_tty_event);
+
+	/* Cancel blocking ReadFile. */
+	if (client_stdin_thread_h != NULL) {
+		CancelIoEx(GetStdHandle(STD_INPUT_HANDLE), NULL);
+		WaitForSingleObject(client_stdin_thread_h, 1000);
+		CloseHandle(client_stdin_thread_h);
+		client_stdin_thread_h = NULL;
+	}
+
+	if (client_tty_fd != -1) {
+		closesocket((SOCKET)client_tty_fd);
+		client_tty_fd = -1;
+	}
+
+	/* Restore console mode. */
+	win32_tty_restore();
+}
+#endif
 
 /* Callback to handle signals in the client. */
 static void
 client_signal(int sig)
 {
+#ifndef _WIN32
 	struct sigaction sigact;
 	int		 status;
 	pid_t		 pid;
+#endif
 
 	log_debug("%s: %s", __func__, strsignal(sig));
 	if (sig == SIGCHLD) {
+#ifndef _WIN32
 		for (;;) {
 			pid = waitpid(WAIT_ANY, &status, WNOHANG);
 			if (pid == 0)
@@ -536,6 +777,7 @@ client_signal(int sig)
 				    strerror(errno));
 			}
 		}
+#endif
 	} else if (!client_attached) {
 		if (sig == SIGTERM || sig == SIGHUP)
 			proc_exit(client_proc);
@@ -553,8 +795,22 @@ client_signal(int sig)
 			proc_send(client_peer, MSG_EXITING, -1, NULL, 0);
 			break;
 		case SIGWINCH:
+#ifdef _WIN32
+			{
+				struct msg_resize_data	rd;
+				int			cols = 80, rows = 24;
+
+				win32_tty_get_size(&cols, &rows);
+				rd.sx = cols;
+				rd.sy = rows;
+				proc_send(client_peer, MSG_RESIZE, -1,
+				    &rd, sizeof rd);
+			}
+#else
 			proc_send(client_peer, MSG_RESIZE, -1, NULL, 0);
+#endif
 			break;
+#ifndef _WIN32
 		case SIGCONT:
 			memset(&sigact, 0, sizeof sigact);
 			sigemptyset(&sigact.sa_mask);
@@ -565,6 +821,7 @@ client_signal(int sig)
 			proc_send(client_peer, MSG_WAKEUP, -1, NULL, 0);
 			client_suspended = 0;
 			break;
+#endif
 		}
 	}
 }
@@ -661,6 +918,9 @@ client_dispatch_wait(struct imsg *imsg)
 			fatalx("bad MSG_READY size");
 
 		client_attached = 1;
+#ifdef _WIN32
+		client_start_tty_relay();
+#endif
 		proc_send(client_peer, MSG_RESIZE, -1, NULL, 0);
 		break;
 	case MSG_VERSION:
@@ -789,6 +1049,9 @@ client_dispatch_attached(struct imsg *imsg)
 		if (datalen != 0)
 			fatalx("bad MSG_SUSPEND size");
 
+#ifdef _WIN32
+		/* No suspend on Windows, just ignore. */
+#else
 		memset(&sigact, 0, sizeof sigact);
 		sigemptyset(&sigact.sa_mask);
 		sigact.sa_flags = SA_RESTART;
@@ -797,6 +1060,7 @@ client_dispatch_attached(struct imsg *imsg)
 			fatal("sigaction failed");
 		client_suspended = 1;
 		kill(getpid(), SIGTSTP);
+#endif
 		break;
 	case MSG_LOCK:
 		if (datalen == 0 || data[datalen - 1] != '\0')

@@ -18,18 +18,29 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <sys/utsname.h>
+#endif
 
+#ifdef _WIN32
+#include <crtdbg.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
+#ifndef _WIN32
 #include <langinfo.h>
+#endif
 #include <locale.h>
+#ifndef _WIN32
 #include <pwd.h>
 #include <signal.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #include "tmux.h"
 
@@ -62,6 +73,17 @@ usage(int status)
 static const char *
 getshell(void)
 {
+#ifdef _WIN32
+	const char	*shell;
+
+	shell = getenv("SHELL");
+	if (shell != NULL && *shell != '\0')
+		return (shell);
+	shell = getenv("COMSPEC");
+	if (shell != NULL && *shell != '\0')
+		return (shell);
+	return (_PATH_BSHELL);
+#else
 	struct passwd	*pw;
 	const char	*shell;
 
@@ -74,13 +96,23 @@ getshell(void)
 		return (pw->pw_shell);
 
 	return (_PATH_BSHELL);
+#endif
 }
 
 int
 checkshell(const char *shell)
 {
-	if (shell == NULL || *shell != '/')
+	if (shell == NULL || *shell == '\0')
 		return (0);
+#ifdef _WIN32
+	if (*shell == '/') {
+		log_debug("ignoring Unix shell path \"%s\" on Windows", shell);
+		return (0);
+	}
+#else
+	if (*shell != '/')
+		return (0);
+#endif
 	if (areshell(shell))
 		return (0);
 	if (access(shell, X_OK) != 0)
@@ -95,6 +127,10 @@ areshell(const char *shell)
 
 	if ((ptr = strrchr(shell, '/')) != NULL)
 		ptr++;
+#ifdef _WIN32
+	else if ((ptr = strrchr(shell, '\\')) != NULL)
+		ptr++;
+#endif
 	else
 		ptr = shell;
 	progname = getprogname();
@@ -186,6 +222,50 @@ expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 static char *
 make_label(const char *label, char **cause)
 {
+#ifdef _WIN32
+	char		*path, *appdata;
+	char		 dir[MAX_PATH];
+
+	*cause = NULL;
+	if (label == NULL)
+		label = "default";
+
+	/* Reject labels with characters unsafe for pipe names / command lines. */
+	{
+		const char *p;
+		for (p = label; *p != '\0'; p++) {
+			if (!(*p >= 'A' && *p <= 'Z') &&
+			    !(*p >= 'a' && *p <= 'z') &&
+			    !(*p >= '0' && *p <= '9') &&
+			    *p != '.' && *p != '_' && *p != '-') {
+				xasprintf(cause, "bad label character '%c'"
+				    " (allowed: A-Z a-z 0-9 . _ -)", *p);
+				return (NULL);
+			}
+		}
+	}
+
+	appdata = getenv("LOCALAPPDATA");
+	if (appdata == NULL)
+		appdata = getenv("APPDATA");
+	if (appdata == NULL) {
+		xasprintf(cause, "no suitable socket path");
+		return (NULL);
+	}
+
+	snprintf(dir, sizeof dir, "%s\\tmux", appdata);
+	_mkdir(dir);
+
+	/* Return "tmux-<username>-<label>" as the label identifier. */
+	{
+		char username[256];
+		DWORD size = sizeof username;
+		if (!GetUserNameA(username, &size))
+			strncpy(username, "user", sizeof username);
+		xasprintf(&path, "tmux-%s-%s", username, label);
+	}
+	return (path);
+#else
 	char		**paths, *path, *base;
 	u_int		  i, n;
 	struct stat	  sb;
@@ -233,6 +313,7 @@ make_label(const char *label, char **cause)
 fail:
 	free(base);
 	return (NULL);
+#endif
 }
 
 char *
@@ -242,6 +323,13 @@ shell_argv0(const char *shell, int is_login)
 	char		*argv0;
 
 	slash = strrchr(shell, '/');
+#ifdef _WIN32
+	{
+		const char *bslash = strrchr(shell, '\\');
+		if (bslash != NULL && (slash == NULL || bslash > slash))
+			slash = bslash;
+	}
+#endif
 	if (slash != NULL && slash[1] != '\0')
 		name = slash + 1;
 	else
@@ -256,6 +344,10 @@ shell_argv0(const char *shell, int is_login)
 void
 setblocking(int fd, int state)
 {
+#ifdef _WIN32
+	u_long mode = state ? 0 : 1;
+	ioctlsocket((SOCKET)fd, FIONBIO, &mode);
+#else
 	int mode;
 
 	if ((mode = fcntl(fd, F_GETFL)) != -1) {
@@ -265,6 +357,7 @@ setblocking(int fd, int state)
 			mode &= ~O_NONBLOCK;
 		fcntl(fd, F_SETFL, mode);
 	}
+#endif
 }
 
 uint64_t
@@ -358,12 +451,21 @@ find_cwd(void)
 const char *
 find_home(void)
 {
-	struct passwd		*pw;
 	static const char	*home;
+#ifndef _WIN32
+	struct passwd		*pw;
+#endif
 
 	if (home != NULL)
 		return (home);
 
+#ifdef _WIN32
+	home = getenv("USERPROFILE");
+	if (home == NULL || *home == '\0')
+		home = getenv("HOME");
+	if (home == NULL || *home == '\0')
+		home = "C:\\";
+#else
 	home = getenv("HOME");
 	if (home == NULL || *home == '\0') {
 		pw = getpwuid(getuid());
@@ -372,6 +474,7 @@ find_home(void)
 		else
 			home = NULL;
 	}
+#endif
 
 	return (home);
 }
@@ -393,6 +496,20 @@ main(int argc, char **argv)
 	const struct options_table_entry	*oe;
 	u_int					 i;
 
+#ifdef _WIN32
+	/* Redirect CRT assertion dialogs to stderr. */
+	_CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+	_CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+	_CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+	_CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+	win32_init_environ();
+	win32_wsa_init();
+	win32_process_init();
+	win32_tty_init_utf8();
+	setlocale(LC_ALL, "");
+	tzset();
+	flags |= CLIENT_UTF8;
+#else
 	if (setlocale(LC_CTYPE, "en_US.UTF-8") == NULL &&
 	    setlocale(LC_CTYPE, "C.UTF-8") == NULL) {
 		if (setlocale(LC_CTYPE, "") == NULL)
@@ -404,6 +521,7 @@ main(int argc, char **argv)
 
 	setlocale(LC_TIME, "");
 	tzset();
+#endif
 
 	if (**argv == '-')
 		flags = CLIENT_LOGIN;
@@ -411,6 +529,15 @@ main(int argc, char **argv)
 	global_environ = environ_create();
 	for (var = environ; *var != NULL; var++)
 		environ_put(global_environ, *var, 0);
+#ifdef _WIN32
+	if (environ_find(global_environ, "PATH") == NULL) {
+		s = getenv("PATH");
+		if (s == NULL || *s == '\0')
+			s = getenv("Path");
+		if (s != NULL && *s != '\0')
+			environ_set(global_environ, "PATH", 0, "%s", s);
+	}
+#endif
 	if ((cwd = find_cwd()) != NULL)
 		environ_set(global_environ, "PWD", 0, "%s", cwd);
 	expand_paths(TMUX_CONF, &cfg_files, &cfg_nfiles, 1);
@@ -441,6 +568,12 @@ main(int argc, char **argv)
 			}
 			cfg_files = xreallocarray(cfg_files, cfg_nfiles + 1,
 			    sizeof *cfg_files);
+
+#ifdef _WIN32
+			if (strcmp(optarg, "/dev/null") == 0)
+				cfg_files[cfg_nfiles++] = xstrdup("NUL");
+			else
+#endif
 			cfg_files[cfg_nfiles++] = xstrdup(optarg);
 			cfg_quiet = 0;
 			break;
@@ -463,6 +596,24 @@ main(int argc, char **argv)
 			break;
 		case 'S':
 			free(path);
+#ifdef _WIN32
+			/*
+			 * On Windows, -S is an IPC label, not a file path.
+			 * Strip any directory prefix (Unix paths are
+			 * meaningless here) so -S /tmp/foo becomes "foo".
+			 */
+			if (strchr(optarg, '/') != NULL) {
+				const char *base;
+				fprintf(stderr, "warning: -S \"%s\" is a "
+				    "Unix-style path; on Windows the "
+				    "basename is used as an IPC label\n",
+				    optarg);
+				base = strrchr(optarg, '/') + 1;
+				if (*base == '\0')
+					base = "default";
+				path = xstrdup(base);
+			} else
+#endif
 			path = xstrdup(optarg);
 			break;
 		case 'T':
@@ -486,8 +637,10 @@ main(int argc, char **argv)
 	if ((flags & CLIENT_NOFORK) && argc != 0)
 		usage(1);
 
+#ifndef _WIN32
 	if ((ptm_fd = getptmfd()) == -1)
 		err(1, "getptmfd");
+#endif
 	if (pledge("stdio rpath wpath cpath flock fattr unix getpw sendfd "
 	    "recvfd proc exec tty ps", NULL) != 0)
 		err(1, "pledge");

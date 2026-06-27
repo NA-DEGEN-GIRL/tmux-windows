@@ -17,14 +17,20 @@
  */
 
 #include <sys/types.h>
+#ifndef _WIN32
 #include <sys/wait.h>
 #include <sys/uio.h>
+#endif
 
+#ifndef _WIN32
 #include <signal.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #include "tmux.h"
 
@@ -329,6 +335,13 @@ server_destroy_pane(struct window_pane *wp, int notify)
 #endif
 		bufferevent_free(wp->event);
 		wp->event = NULL;
+#ifdef _WIN32
+		if (wp->win32_pty != NULL) {
+			win32_pty_close((struct win32_pty *)wp->win32_pty);
+			wp->win32_pty = NULL;
+			wp->fd = -1;
+		} else
+#endif
 		close(wp->fd);
 		wp->fd = -1;
 	}

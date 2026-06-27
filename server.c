@@ -17,21 +17,29 @@
  */
 
 #include <sys/types.h>
+#ifndef _WIN32
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
+#ifndef _WIN32
 #include <signal.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <termios.h>
+#endif
 #include <time.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #include "tmux.h"
 
@@ -47,6 +55,80 @@ static uint64_t		 server_client_flags;
 static int		 server_exit;
 static struct event	 server_ev_accept;
 static struct event	 server_ev_tidy;
+
+#ifdef _WIN32
+/*
+ * Pending tty channel connections waiting to be matched with a client.
+ * When a TTY channel connection arrives in server_accept(), we store it
+ * here until the client sends MSG_IDENTIFY_TTYTOKEN to claim it.
+ */
+#define MAX_PENDING_TTYS    16
+#define PENDING_TTY_EXPIRY  30  /* seconds */
+
+struct pending_tty {
+	char			 token[65];
+	int			 fd;
+	time_t			 created;
+	TAILQ_ENTRY(pending_tty) entry;
+};
+static TAILQ_HEAD(, pending_tty) pending_ttys =
+    TAILQ_HEAD_INITIALIZER(pending_ttys);
+
+void
+server_add_pending_tty(const char *token, int fd)
+{
+	struct pending_tty	*pt, *pt_next;
+	time_t			 now;
+	u_int			 count = 0;
+
+	now = time(NULL);
+
+	/* Expire stale entries. */
+	TAILQ_FOREACH_SAFE(pt, &pending_ttys, entry, pt_next) {
+		if (now - pt->created >= PENDING_TTY_EXPIRY) {
+			log_debug("expiring pending tty: token=%s fd=%d",
+			    pt->token, pt->fd);
+			close(pt->fd);
+			TAILQ_REMOVE(&pending_ttys, pt, entry);
+			free(pt);
+		} else
+			count++;
+	}
+
+	/* Enforce cap. */
+	if (count >= MAX_PENDING_TTYS) {
+		log_debug("pending tty queue full, rejecting fd=%d", fd);
+		close(fd);
+		return;
+	}
+
+	pt = xcalloc(1, sizeof *pt);
+	strlcpy(pt->token, token, sizeof pt->token);
+	pt->fd = fd;
+	pt->created = now;
+	TAILQ_INSERT_TAIL(&pending_ttys, pt, entry);
+	log_debug("added pending tty: token=%s fd=%d", token, fd);
+}
+
+int
+server_get_pending_tty(const char *token)
+{
+	struct pending_tty	*pt, *pt_next;
+	int			 fd;
+
+	TAILQ_FOREACH_SAFE(pt, &pending_ttys, entry, pt_next) {
+		if (strcmp(pt->token, token) == 0) {
+			fd = pt->fd;
+			TAILQ_REMOVE(&pending_ttys, pt, entry);
+			free(pt);
+			log_debug("matched pending tty: token=%s fd=%d",
+			    token, fd);
+			return (fd);
+		}
+	}
+	return (-1);
+}
+#endif
 
 struct cmd_find_state	 marked_pane;
 
@@ -106,6 +188,21 @@ server_check_marked(void)
 int
 server_create_socket(uint64_t flags, char **cause)
 {
+#ifdef _WIN32
+	int		 fd;
+	uint16_t	 port;
+
+	(void)flags;
+	fd = win32_ipc_create_server(socket_path, &port);
+	if (fd == -1) {
+		if (cause != NULL)
+			xasprintf(cause, "error creating server socket for %s",
+			    socket_path);
+		return (-1);
+	}
+	setblocking(fd, 0);
+	return (fd);
+#else
 	struct sockaddr_un	sa;
 	size_t			size;
 	mode_t			mask;
@@ -151,6 +248,7 @@ fail:
 		    strerror(errno));
 	}
 	return (-1);
+#endif
 }
 
 /* Tidy up every hour. */
@@ -177,17 +275,23 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
     int lockfd, char *lockfile)
 {
 	int		 fd;
+#ifndef _WIN32
 	sigset_t	 set, oldset;
+#endif
 	struct client	*c = NULL;
 	char		*cause = NULL;
 	struct timeval	 tv = { .tv_sec = 3600 };
 
+#ifndef _WIN32
 	sigfillset(&set);
 	sigprocmask(SIG_BLOCK, &set, &oldset);
+#endif
 
 	if (~flags & CLIENT_NOFORK) {
 		if (proc_fork_and_daemon(&fd) != 0) {
+#ifndef _WIN32
 			sigprocmask(SIG_SETMASK, &oldset, NULL);
+#endif
 			return (fd);
 		}
 	}
@@ -199,7 +303,9 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 	server_proc = proc_start("server");
 
 	proc_set_signals(server_proc, server_signal);
+#ifndef _WIN32
 	sigprocmask(SIG_SETMASK, &oldset, NULL);
+#endif
 
 	if (log_get_level() > 1)
 		tty_create_log();
@@ -226,8 +332,10 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 		server_update_socket();
 	if (~flags & CLIENT_NOFORK)
 		c = server_client_create(fd);
+#ifndef _WIN32
 	else
 		options_set_number(global_options, "exit-empty", 0);
+#endif
 
 	if (lockfd >= 0) {
 		unlink(lockfile);
@@ -255,6 +363,11 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 
 	job_kill_all();
 	prompt_save_history();
+
+#ifdef _WIN32
+	/* Shut down the discovery pipe and accept thread. */
+	win32_ipc_cleanup(socket_path);
+#endif
 
 	exit(0);
 }
@@ -302,6 +415,11 @@ server_loop(void)
 	if (job_still_running())
 		return (0);
 
+	log_debug("server_loop: exiting (exit-empty=%lld exit-unatt=%lld "
+	    "sessions=%d server_exit=%d)",
+	    (long long)options_get_number(global_options, "exit-empty"),
+	    (long long)options_get_number(global_options, "exit-unattached"),
+	    !RB_EMPTY(&sessions), server_exit);
 	return (1);
 }
 
@@ -332,6 +450,9 @@ server_send_exit(void)
 void
 server_update_socket(void)
 {
+#ifdef _WIN32
+	/* No socket file permissions to manage on Windows. */
+#else
 	struct session	*s;
 	static int	 last = -1;
 	int		 n, mode;
@@ -362,6 +483,7 @@ server_update_socket(void)
 			mode &= ~(S_IXUSR|S_IXGRP|S_IXOTH);
 		chmod(socket_path, mode);
 	}
+#endif
 }
 
 /* Callback for server socket. */
@@ -389,8 +511,79 @@ server_accept(int fd, short events, __unused void *data)
 		fatal("accept failed");
 	}
 
+#ifdef _WIN32
+	/*
+	 * On Windows, the client sends an auth line before the imsg
+	 * protocol. This can be either:
+	 *   "<auth_token>\n" - regular imsg connection
+	 *   "TTY:<token>:<auth_token>\n" - tty data channel
+	 */
+	{
+		char tty_token[65] = {0};
+		int auth_result;
+
+		auth_result = win32_ipc_verify_auth(newfd, socket_path,
+		    tty_token, sizeof tty_token);
+		if (auth_result == -1) {
+			closesocket((SOCKET)newfd);
+			return;
+		}
+		if (auth_result == 1) {
+			/*
+			 * TTY channel. Try to find a client already
+			 * waiting for this token; otherwise queue it.
+			 */
+			struct client *tc;
+			TAILQ_FOREACH(tc, &clients, entry) {
+				if (tc->tty_token != NULL &&
+				    strcmp(tc->tty_token, tty_token) == 0) {
+					tc->fd = newfd;
+					log_debug("matched tty fd %d for "
+					    "client %p", newfd, tc);
+					free(tc->tty_token);
+					tc->tty_token = NULL;
+					if ((tc->flags & CLIENT_IDENTIFIED) &&
+					    !(tc->flags &
+					    (CLIENT_TERMINAL|CLIENT_CONTROL))) {
+						u_int sx = tc->tty.sx;
+						u_int sy = tc->tty.sy;
+						if (tty_init(&tc->tty, tc) == 0) {
+							if (sx == 0)
+								sx = 80;
+							if (sy == 0)
+								sy = 24;
+							tty_set_size(&tc->tty,
+							    sx, sy, 0, 0);
+							tc->flags |= CLIENT_TERMINAL;
+							recalculate_sizes();
+							server_redraw_client(tc);
+						}
+						if (event_initialized(
+						    &tc->tty_wait_timer))
+							evtimer_del(
+							    &tc->tty_wait_timer);
+						if (tc->tty_wait_item != NULL) {
+							cmdq_continue(
+							    tc->tty_wait_item);
+							tc->tty_wait_item = NULL;
+						}
+					}
+					server_add_accept(0);
+					return;
+				}
+			}
+			server_add_pending_tty(tty_token, newfd);
+			return;
+		}
+	}
+#endif
+
 	if (server_exit) {
+#ifdef _WIN32
+		closesocket((SOCKET)newfd);
+#else
 		close(newfd);
+#endif
 		return;
 	}
 	c = server_client_create(newfd);
@@ -442,6 +635,7 @@ server_signal(int sig)
 	case SIGCHLD:
 		server_child_signal();
 		break;
+#ifndef _WIN32
 	case SIGUSR1:
 		event_del(&server_ev_accept);
 		fd = server_create_socket(server_client_flags, NULL);
@@ -454,6 +648,10 @@ server_signal(int sig)
 		break;
 	case SIGUSR2:
 		proc_toggle_log(server_proc);
+		break;
+#endif
+	case SIGWINCH:
+		/* On Windows, SIGWINCH from resize polling. */
 		break;
 	}
 }
@@ -470,7 +668,11 @@ server_child_signal(void)
 		case -1:
 			if (errno == ECHILD)
 				return;
+#ifndef _WIN32
 			fatal("waitpid failed");
+#else
+			return;
+#endif
 		case 0:
 			return;
 		}

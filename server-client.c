@@ -17,15 +17,19 @@
  */
 
 #include <sys/types.h>
+#ifndef _WIN32
 #include <sys/ioctl.h>
 #include <sys/uio.h>
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #include "tmux.h"
 
@@ -77,6 +81,37 @@ server_client_how_many(void)
 	}
 	return (n);
 }
+
+#ifdef _WIN32
+/* Cmdq callback that blocks until tty_token is consumed. */
+static enum cmd_retval
+server_client_tty_wait_cb(__unused struct cmdq_item *item, __unused void *data)
+{
+	struct client	*c = cmdq_get_client(item);
+
+	if (c->tty_token != NULL)
+		return (CMD_RETURN_WAIT);
+	return (CMD_RETURN_NORMAL);
+}
+
+/* Safety-net timeout: give up waiting for the TTY channel. */
+static void
+server_client_tty_wait_timeout(__unused int fd, __unused short events,
+    void *data)
+{
+	struct client	*c = data;
+
+	log_debug("client %p tty wait timeout", c);
+
+	free(c->tty_token);
+	c->tty_token = NULL;
+
+	if (c->tty_wait_item != NULL) {
+		cmdq_continue(c->tty_wait_item);
+		c->tty_wait_item = NULL;
+	}
+}
+#endif
 
 /* Overlay timer callback. */
 static void
@@ -342,6 +377,12 @@ server_client_open(struct client *c, char **cause)
 	if (c->flags & CLIENT_CONTROL)
 		return (0);
 
+#ifndef _WIN32
+	/*
+	 * On Unix, reject clients whose tty matches the server's controlling
+	 * terminal to prevent loopback. On Windows, all consoles report "CON"
+	 * so this check is meaningless and must be skipped.
+	 */
 	if (strcmp(c->ttyname, ttynam) == 0||
 	    ((isatty(STDIN_FILENO) &&
 	    (ttynam = ttyname(STDIN_FILENO)) != NULL &&
@@ -355,6 +396,7 @@ server_client_open(struct client *c, char **cause)
 		xasprintf(cause, "can't use %s", c->ttyname);
 		return (-1);
 	}
+#endif
 
 	if (!(c->flags & CLIENT_TERMINAL)) {
 		*cause = xstrdup("not a terminal");
@@ -470,6 +512,11 @@ server_client_lost(struct client *c)
 	if (c->flags & CLIENT_TERMINAL)
 		tty_free(&c->tty);
 	free(c->ttyname);
+	free(c->tty_token);
+#ifdef _WIN32
+	if (event_initialized(&c->tty_wait_timer))
+		evtimer_del(&c->tty_wait_timer);
+#endif
 	free(c->clipboard_panes);
 
 	free(c->term_name);
@@ -500,10 +547,21 @@ server_client_lost(struct client *c)
 
 	if (c->out_fd != -1)
 		close(c->out_fd);
+#ifdef _WIN32
+	/*
+	 * On Windows, c->fd is a separate tty channel socket.
+	 * Close it with closesocket since it's a Winsock socket.
+	 */
+	if (c->fd != -1) {
+		closesocket((SOCKET)c->fd);
+		c->fd = -1;
+	}
+#else
 	if (c->fd != -1) {
 		close(c->fd);
 		c->fd = -1;
 	}
+#endif
 	server_client_unref(c);
 
 	server_add_accept(0); /* may be more file descriptors now */
@@ -2340,6 +2398,7 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 	case MSG_IDENTIFY_TERM:
 	case MSG_IDENTIFY_TERMINFO:
 	case MSG_IDENTIFY_TTYNAME:
+	case MSG_IDENTIFY_TTYTOKEN:
 	case MSG_IDENTIFY_DONE:
 		if (server_client_dispatch_identify(c, imsg) != 0)
 			goto bad;
@@ -2349,13 +2408,33 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 			goto bad;
 		break;
 	case MSG_RESIZE:
-		if (datalen != 0)
+		if (datalen != 0 &&
+		    datalen != sizeof(struct msg_resize_data))
 			goto bad;
 
 		if (c->flags & CLIENT_CONTROL)
 			break;
 		server_client_update_latest(c);
-		tty_resize(&c->tty);
+		if (datalen == sizeof(struct msg_resize_data)) {
+			/*
+			 * Client sent its terminal dimensions (Windows).
+			 * Apply them directly instead of querying the
+			 * server's (non-existent) console.
+			 */
+			struct msg_resize_data	*rd = imsg->data;
+			u_int			 sx = rd->sx, sy = rd->sy;
+
+			if (sx == 0)
+				sx = 80;
+			if (sy == 0)
+				sy = 24;
+			log_debug("client %p resize from msg: %ux%u",
+			    c, sx, sy);
+			tty_set_size(&c->tty, sx, sy, 0, 0);
+			tty_invalidate(&c->tty);
+		} else {
+			tty_resize(&c->tty);
+		}
 		tty_repeat_requests(&c->tty, 0);
 		recalculate_sizes();
 		if (c->overlay_resize == NULL)
@@ -2374,6 +2453,28 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 		tty_close(&c->tty);
 		proc_send(c->peer, MSG_EXITED, -1, NULL, 0);
 		break;
+#ifdef _WIN32
+	case MSG_WIN32_TTY_INPUT:
+		/* Client sent raw terminal input; feed into tty input buffer. */
+		if (datalen > 0 && c->tty.in != NULL)
+			evbuffer_add(c->tty.in, imsg->data, datalen);
+		break;
+	case MSG_WIN32_TTY_RESIZE:
+		/* Client reported a terminal resize. */
+		if (c->flags & CLIENT_CONTROL)
+			break;
+		server_client_update_latest(c);
+		tty_resize(&c->tty);
+		recalculate_sizes();
+		if (c->overlay_resize == NULL)
+			server_client_clear_overlay(c);
+		else
+			c->overlay_resize(c, c->overlay_data);
+		server_redraw_client(c);
+		if (c->session != NULL)
+			notify_client("client-resized", c);
+		break;
+#endif
 	case MSG_WAKEUP:
 	case MSG_UNLOCK:
 		if (datalen != 0)
@@ -2632,6 +2733,25 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 		memcpy(&c->pid, data, sizeof c->pid);
 		log_debug("client %p IDENTIFY_CLIENTPID %ld", c, (long)c->pid);
 		break;
+	case MSG_IDENTIFY_TTYTOKEN:
+#ifdef _WIN32
+		if (datalen == 0 || data[datalen - 1] != '\0')
+			return (-1);
+		c->tty_token = xstrdup(data);
+		log_debug("client %p IDENTIFY_TTYTOKEN %s", c, data);
+		/* Try to find a matching pending tty connection. */
+		{
+			int tty_fd = server_get_pending_tty(data);
+			if (tty_fd != -1) {
+				c->fd = tty_fd;
+				free(c->tty_token);
+				c->tty_token = NULL;
+				log_debug("client %p matched tty fd %d",
+				    c, tty_fd);
+			}
+		}
+#endif
+		break;
 	default:
 		break;
 	}
@@ -2657,11 +2777,44 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 	c->out_fd = dup(c->fd);
 #endif
 
+#ifdef _WIN32
+	/*
+	 * On Windows, tty I/O uses a separate TCP connection (tty channel).
+	 * If we haven't matched it yet, check the pending list. If still not
+	 * found, defer command processing via a blocking cmdq callback so the
+	 * TTY channel can arrive on the next event-loop iteration.
+	 */
+	if (c->fd == -1 && c->tty_token != NULL) {
+		int tty_fd = server_get_pending_tty(c->tty_token);
+		if (tty_fd != -1) {
+			c->fd = tty_fd;
+			log_debug("client %p late-matched tty fd %d",
+			    c, tty_fd);
+			free(c->tty_token);
+			c->tty_token = NULL;
+		} else {
+			struct timeval	tv = { .tv_sec = 2 };
+
+			log_debug("client %p deferring for tty channel", c);
+			c->tty_wait_item = cmdq_get_callback(
+			    server_client_tty_wait_cb, NULL);
+			cmdq_append(c, c->tty_wait_item);
+			evtimer_set(&c->tty_wait_timer,
+			    server_client_tty_wait_timeout, c);
+			evtimer_add(&c->tty_wait_timer, &tv);
+		}
+	}
+#endif
+
 	if (c->flags & CLIENT_CONTROL)
 		control_start(c);
 	else if (c->fd != -1) {
 		if (tty_init(&c->tty, c) != 0) {
+#ifdef _WIN32
+			closesocket((SOCKET)c->fd);
+#else
 			close(c->fd);
+#endif
 			c->fd = -1;
 		} else {
 			tty_resize(&c->tty);

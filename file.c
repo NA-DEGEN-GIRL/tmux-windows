@@ -23,7 +23,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 #include "tmux.h"
 
@@ -54,6 +58,16 @@ file_get_path(struct client *c, const char *file)
 	}
 	if (*path == '/')
 		return (path);
+#ifdef _WIN32
+	/* Detect Windows drive letter paths, including MSYS2-escaped C\: */
+	if (*path != '\0' && (path[1] == ':' ||
+	    (path[1] == '\\' && path[2] == ':'))) {
+		/* Strip MSYS2 backslash-escape: C\:/foo -> C:/foo */
+		if (path[1] == '\\' && path[2] == ':')
+			memmove(path + 1, path + 2, strlen(path + 2) + 1);
+		return (path);
+	}
+#endif
 	xasprintf(&full_path, "%s/%s", server_client_get_cwd(c, NULL), path);
 	free(path);
 	return (full_path);
@@ -615,6 +629,18 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 		goto reply;
 	}
 
+#ifdef _WIN32
+	/*
+	 * On Windows, stdout/stderr are CRT file descriptors (console
+	 * handles), not Winsock sockets. libevent's bufferevent uses
+	 * select() which only works with sockets on Windows.  Skip the
+	 * bufferevent; file_write_data() will write directly to cf->fd.
+	 */
+	if (msg->fd == STDOUT_FILENO || msg->fd == STDERR_FILENO) {
+		cf->event = NULL;
+		goto reply;
+	}
+#endif
 	cf->event = bufferevent_new(cf->fd, NULL, file_write_callback,
 	    file_write_error_callback, cf);
 	if (cf->event == NULL)
@@ -646,6 +672,12 @@ file_write_data(struct client_files *files, struct imsg *imsg)
 
 	if (cf->event != NULL)
 		bufferevent_write(cf->event, msg + 1, size);
+#ifdef _WIN32
+	else if (cf->fd != -1) {
+		/* Direct write for non-socket fds (stdout/stderr). */
+		_write(cf->fd, msg + 1, (unsigned int)size);
+	}
+#endif
 }
 
 /* Handle a file write close message (client). */
@@ -668,6 +700,7 @@ file_write_close(struct client_files *files, struct imsg *imsg)
 			bufferevent_free(cf->event);
 		if (cf->fd != -1)
 			close(cf->fd);
+		cf->fd = -1;
 		RB_REMOVE(client_files, files, cf);
 		file_free(cf);
 	}
@@ -776,6 +809,20 @@ file_read_open(struct client_files *files, struct tmuxpeer *peer,
 		goto reply;
 	}
 
+#ifdef _WIN32
+	/*
+	 * On Windows, stdin is a CRT file descriptor (console handle),
+	 * not a Winsock socket. libevent's bufferevent uses select()
+	 * which only works with sockets. Send an immediate read-done
+	 * with no data for stdin.
+	 */
+	if (msg->fd == STDIN_FILENO) {
+		close(cf->fd);
+		cf->fd = -1;
+		error = 0;
+		goto reply;
+	}
+#endif
 	cf->event = bufferevent_new(cf->fd, file_read_callback, NULL,
 	    file_read_error_callback, cf);
 	if (cf->event == NULL)
