@@ -154,8 +154,8 @@ CI runs 8 test scripts (230+ assertions). Windows-specific tests are in
 `regress/`. Run with:
 
 ```bash
-TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-basic.sh
-TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-claude-swarm.sh
+TEST_TMUX=./build/win32/tmux.exe bash regress/win32-basic.sh
+TEST_TMUX=./build/win32/tmux.exe bash regress/win32-claude-swarm.sh
 ```
 
 ### win32-basic.sh (8 tests)
@@ -223,13 +223,7 @@ shadowing the Windows `%TMP%` environment variable (which would cause
 
 ## Installation
 
-### Via winget
-
-```powershell
-winget install arndawg.tmux-windows
-```
-
-### Manual
+### Local build install
 
 From a local build tree:
 
@@ -245,12 +239,20 @@ sessions running, pass `-KeepSessions` and run `tmux kill-server` yourself
 before the next upgrade; Windows may refuse to replace `tmux.exe` while that
 server is still resident.
 
-For a release zip:
+### Release zip
+
+If this repository publishes a release artifact:
 
 1. Download the latest `tmux-windows-*.zip` from
-   [GitHub Releases](https://github.com/arndawg/tmux-windows/releases)
+   [GitHub Releases](https://github.com/NA-DEGEN-GIRL/tmux-windows/releases)
 2. Extract `tmux.exe` to a folder in your `%PATH%`
 3. Run `tmux new-session`
+
+### External packages
+
+The `arndawg.tmux-windows` winget package belongs to the reference Windows
+port, not this repository. It can be useful for comparison, but it should not
+be treated as a release of this fork.
 
 ### Upgrading
 
@@ -276,9 +278,10 @@ cmake -S . -B build -G "Visual Studio 17 2022" `
 cmake --build build --config Release
 ```
 
-The resulting `tmux.exe` is a single statically-linked binary in
-`build/Release/`. For debug builds, use `--config Debug` (output in
-`build/Debug/`). Copy `tmux.exe` to a directory in `%PATH%`.
+The resulting `tmux.exe` is a single statically-linked binary. With the local
+Ninja build used by this repository, the binary is written to
+`build\win32\tmux.exe`. Copy it to a directory in `%PATH%` or run
+`.\install-user.ps1`.
 
 CI builds run automatically on every push via GitHub Actions
 (`.github/workflows/ci.yml`). Tagged releases (`v*`) produce downloadable

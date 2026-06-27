@@ -58,17 +58,12 @@ sh autogen.sh
 
 ### Windows
 
-The Windows port builds with MSVC and CMake. Install via winget:
+This fork carries a native Windows port that builds with MSVC and CMake.
+For the current fork-specific build, install, and usage notes, see the root
+[README.md](../README.md) and [README_WIN32.MD](../README_WIN32.MD).
 
-~~~powershell
-winget install arndawg.tmux-windows
-~~~
-
-Or download pre-built binaries from
-[GitHub Releases](https://github.com/arndawg/tmux-windows/releases).
-
-For build instructions and Windows-specific documentation, see
-[README_WIN32.MD](../README_WIN32.MD).
+The external `arndawg.tmux-windows` winget package belongs to the reference
+Windows port and is not a release of this repository.
 
 ## Contributing
 
