@@ -231,6 +231,22 @@ winget install arndawg.tmux-windows
 
 ### Manual
 
+From a local build tree:
+
+```powershell
+.\install-user.ps1
+```
+
+This copies `build\win32\tmux.exe` to `%LOCALAPPDATA%\tmux-windows\bin`,
+adds that directory to the user `Path`, and stops any existing native tmux
+server first so new `tmux` clients do not attach to stale sessions created by
+an older binary. If you intentionally want to keep the current server and
+sessions running, pass `-KeepSessions` and run `tmux kill-server` yourself
+before the next upgrade; Windows may refuse to replace `tmux.exe` while that
+server is still resident.
+
+For a release zip:
+
 1. Download the latest `tmux-windows-*.zip` from
    [GitHub Releases](https://github.com/arndawg/tmux-windows/releases)
 2. Extract `tmux.exe` to a folder in your `%PATH%`
@@ -238,8 +254,11 @@ winget install arndawg.tmux-windows
 
 ### Upgrading
 
-Run `tmux kill-server` before upgrading. Windows cannot overwrite a running
-executable, and `winget upgrade` will fail if the server is resident.
+Run `tmux kill-server` before upgrading release zip or package-manager
+installations. Windows cannot overwrite a running executable, and package
+upgrades can fail or leave clients attached to an old server if it is
+resident. The local `install-user.ps1` helper does this automatically unless
+`-KeepSessions` is used.
 
 With the exit-empty fix, the server auto-exits when all sessions are destroyed,
 so the server is only resident while sessions are active.
