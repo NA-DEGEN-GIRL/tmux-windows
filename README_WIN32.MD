@@ -196,11 +196,11 @@ skipped (runs via cmd.exe on Windows).
 Port of upstream `conf-syntax.sh`. Validates all 21 `regress/conf/*.conf`
 files parse without error.
 
-### win32-keys.sh (12 tests)
+### win32-keys.sh (13 tests)
 
 Windows-specific key handling: Enter, literals, Space, Tab, Escape, Ctrl-C,
 arrow keys in copy mode, Home/End, PgUp/PgDn, F-keys, Backspace, modifier
-combos. Tests key effects, not raw codes.
+combos, and mouse wheel key names. Tests key effects, not raw codes.
 
 ### win32-has-session.sh (3 tests)
 

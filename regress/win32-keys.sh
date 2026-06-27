@@ -20,13 +20,14 @@ FNULL="-fNUL"
 OUT=$(mktemp)
 trap "rm -f $OUT; $TMUX kill-server 2>/dev/null" 0 1 15
 FAIL=0
+SHELL_CMD="${COMSPEC:-cmd.exe} /K"
 
 fail() {
 	echo "FAIL: $1"
 	FAIL=1
 }
 
-$TMUX $FNULL new -d -skeys -x 120 -y 24 < /dev/null || exit 1
+$TMUX $FNULL new -d -skeys -x 120 -y 24 "$SHELL_CMD" < /dev/null || exit 1
 sleep 1
 
 # --- Test 1: Enter key executes commands ---
@@ -173,6 +174,14 @@ $TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "MOD_OK" || {
 	fail "Modifier combinations broke pane"
 }
 echo "PASS 12: Modifier combinations"
+
+# --- Test 13: Mouse wheel key names are recognized ---
+for key in WheelUpPane WheelDownPane WheelUpStatus WheelDownStatus; do
+	$TMUX bind-key -n "$key" display-message "WHEEL_OK" || {
+		fail "Mouse wheel key not recognized: $key"
+	}
+done
+echo "PASS 13: Mouse wheel key names"
 
 $TMUX kill-server 2>/dev/null
 
