@@ -1576,11 +1576,13 @@ server_client_handle_key0(struct client *c, struct key_event *event,
 	 * Handle theme reporting keys before overlays so they work even when a
 	 * popup is open.
 	 */
-	if (event->key == KEYC_REPORT_LIGHT_THEME) {
+	if (KEYC_IS_SPECIAL(event->key) &&
+	    event->key == KEYC_REPORT_LIGHT_THEME) {
 		server_client_report_theme(c, THEME_LIGHT);
 		return (0);
 	}
-	if (event->key == KEYC_REPORT_DARK_THEME) {
+	if (KEYC_IS_SPECIAL(event->key) &&
+	    event->key == KEYC_REPORT_DARK_THEME) {
 		server_client_report_theme(c, THEME_DARK);
 		return (0);
 	}

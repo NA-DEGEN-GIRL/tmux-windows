@@ -253,6 +253,33 @@ if(TMUX_ENABLE_SIXEL)
     list(APPEND TMUX_SOURCES image.c image-sixel.c)
 endif()
 
+# Localized MSVC /showIncludes output is not always parsed correctly by Ninja.
+# Keep project headers as explicit dependencies so a header change can never
+# leave objects built against an older key or ABI definition.
+if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
+    file(GLOB TMUX_ROOT_HEADERS CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
+    )
+    file(GLOB TMUX_COMPAT_HEADERS CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/compat/*.h"
+    )
+    file(GLOB TMUX_WIN32_HEADERS CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/win32/*.h"
+    )
+    set(TMUX_PROJECT_HEADERS
+        ${TMUX_ROOT_HEADERS}
+        ${TMUX_COMPAT_HEADERS}
+        ${TMUX_WIN32_HEADERS}
+    )
+    set_property(SOURCE
+        ${TMUX_SOURCES}
+        ${TMUX_OSDEP_SOURCES}
+        ${TMUX_COMPAT_SOURCES}
+        ${TMUX_WIN32_SOURCES}
+        APPEND PROPERTY OBJECT_DEPENDS ${TMUX_PROJECT_HEADERS}
+    )
+endif()
+
 # Build tmux executable
 add_executable(tmux
     ${TMUX_SOURCES}

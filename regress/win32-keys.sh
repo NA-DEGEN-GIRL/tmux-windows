@@ -183,6 +183,15 @@ for key in WheelUpPane WheelDownPane WheelUpStatus WheelDownStatus; do
 done
 echo "PASS 13: Mouse wheel key names"
 
+# --- Test 14: ASCII punctuation does not collide with special keys ---
+$TMUX send-keys -tkeys "echo PUNCT_A/B C:\\Windows /? https://example.test/path" Enter
+sleep 2
+$TMUX capture-pane -tkeys -p | tr -d '\r' | grep -Fq \
+    "PUNCT_A/B C:\\Windows /? https://example.test/path" || {
+	fail "ASCII punctuation was not delivered literally"
+}
+echo "PASS 14: ASCII punctuation"
+
 $TMUX kill-server 2>/dev/null
 
 if [ $FAIL -eq 0 ]; then

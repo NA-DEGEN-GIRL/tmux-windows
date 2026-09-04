@@ -442,6 +442,13 @@ enum {
 	KEYC_MOUSE_KEYS(TRIPLECLICK),
 };
 
+#ifdef _WIN32
+_Static_assert(KEYC_NONE > 0x7f,
+    "special key codes must not overlap ASCII input");
+_Static_assert(KEYC_REPORT_DARK_THEME > 0x7f,
+    "theme report keys must not overlap ASCII input");
+#endif
+
 /* Termcap codes. */
 enum tty_code_code {
 	TTYC_ACSC,
