@@ -192,6 +192,15 @@ $TMUX capture-pane -tkeys -p | tr -d '\r' | grep -Fq \
 }
 echo "PASS 14: ASCII punctuation"
 
+# --- Test 15: packed UTF-8 keys retain their metadata ---
+$TMUX send-keys -tkeys "echo UTF8_" 0xACC4 0xC18D "_" 0xC9C4 0xD589 Enter
+sleep 2
+expected=$(printf 'UTF8_\352\263\204\354\206\215_\354\247\204\355\226\211')
+$TMUX capture-pane -tkeys -p | tr -d '\r' | grep -Fq "$expected" || {
+	fail "UTF-8 key metadata was not preserved"
+}
+echo "PASS 15: UTF-8 key metadata"
+
 $TMUX kill-server 2>/dev/null
 
 if [ $FAIL -eq 0 ]; then

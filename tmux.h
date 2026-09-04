@@ -166,7 +166,7 @@ struct winlink;
 #define KEYC_MASK_TYPE       0x000000ff000000ULL
 #define KEYC_MASK_MODIFIERS  0x00ff0000000000ULL
 #define KEYC_MASK_FLAGS      0xff000000000000ULL
-#define KEYC_MASK_KEY        0x00000000ffffffULL
+#define KEYC_MASK_KEY        0x000000ffffffffffULL
 #else
 #define KEYC_MASK_TYPE       0x0000ff00000000ULL
 #define KEYC_MASK_MODIFIERS  0x00ff0000000000ULL
@@ -222,9 +222,16 @@ enum key_code_mouse_location {
 };
 
 /* Is this a Unicode key? */
+#ifdef _MSC_VER
+/* Packed UTF-8 metadata starts above the MSVC-safe special key types. */
+#define KEYC_IS_UNICODE(key) \
+	(((key) & KEYC_MASK_TYPE) > KEYC_SHIFT_TYPE(KEYC_TYPE_NOTYPE) && \
+	 ((key) & KEYC_MASK_KEY) > 0x7f)
+#else
 #define KEYC_IS_UNICODE(key) \
 	(((key) & KEYC_MASK_TYPE) == KEYC_SHIFT_TYPE(KEYC_TYPE_UNICODE) && \
 	 ((key) & KEYC_MASK_KEY) > 0x7f)
+#endif
 
 /* Is this a user key? */
 #define KEYC_IS_USER(key) \
@@ -447,6 +454,10 @@ _Static_assert(KEYC_NONE > 0x7f,
     "special key codes must not overlap ASCII input");
 _Static_assert(KEYC_REPORT_DARK_THEME > 0x7f,
     "theme report keys must not overlap ASCII input");
+_Static_assert((KEYC_BSPACE & KEYC_MASK_KEY) == KEYC_BSPACE,
+    "the key mask must preserve special key type bits");
+_Static_assert(KEYC_IS_UNICODE(0x6384b3eaULL),
+    "the Windows key layout must preserve packed UTF-8 input");
 #endif
 
 /* Termcap codes. */

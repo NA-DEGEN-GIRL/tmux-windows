@@ -506,7 +506,8 @@ main(int argc, char **argv)
 	win32_wsa_init();
 	win32_process_init();
 	win32_tty_init_utf8();
-	setlocale(LC_ALL, "");
+	if (setlocale(LC_ALL, ".UTF-8") == NULL)
+		errx(1, "unable to enable the UTF-8 C locale");
 	tzset();
 	flags |= CLIENT_UTF8;
 #else
