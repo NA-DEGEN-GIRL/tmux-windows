@@ -50,6 +50,11 @@ jobs:
         run: |
           cmake --build build --config Release
 
+      - name: Run native unit tests
+        shell: pwsh
+        run: |
+          ctest --test-dir build -C Debug --output-on-failure
+
       - name: Run basic regression tests
         shell: bash
         run: |

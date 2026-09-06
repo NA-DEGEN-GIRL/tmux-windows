@@ -917,6 +917,8 @@ tty_term_string_s(struct tty_term *term, enum tty_code_code code, const char *a)
 	s = tiparm_s(1, 1, x, a);
 #elif defined(HAVE_TIPARM)
 	s = tiparm(x, a);
+#elif defined(_WIN32)
+	s = tparm((char *)x, (intptr_t)a, 0, 0, 0, 0, 0, 0, 0, 0);
 #else
 	s = tparm((char *)x, (long)a, 0, 0, 0, 0, 0, 0, 0, 0);
 #endif
@@ -937,6 +939,9 @@ tty_term_string_ss(struct tty_term *term, enum tty_code_code code,
 	s = tiparm_s(2, 3, x, a, b);
 #elif defined(HAVE_TIPARM)
 	s = tiparm(x, a, b);
+#elif defined(_WIN32)
+	s = tparm((char *)x, (intptr_t)a, (intptr_t)b, 0, 0, 0, 0, 0, 0,
+	    0);
 #else
 	s = tparm((char *)x, (long)a, (long)b, 0, 0, 0, 0, 0, 0, 0);
 #endif

@@ -8,7 +8,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -604,24 +603,19 @@ win32_fnmatch(const char *pattern, const char *string, int flags)
 #define TPARM_BUF_SIZE   4096
 
 char *
-tparm(const char *str, ...)
+tparm(const char *str, intptr_t p1, intptr_t p2, intptr_t p3, intptr_t p4,
+    intptr_t p5, intptr_t p6, intptr_t p7, intptr_t p8, intptr_t p9)
 {
 	static char	 buf[TPARM_BUF_SIZE];
-	intptr_t	 params[9];
+	intptr_t	 params[9] = { p1, p2, p3, p4, p5, p6, p7, p8, p9 };
 	intptr_t	 stack[TPARM_STACK_SIZE];
 	int		 sp = 0; /* stack pointer */
 	size_t		 pos = 0;
 	const char	*p;
-	va_list		 ap;
-	int		 i, n;
+	int		 n;
 
 	if (str == NULL)
 		return (NULL);
-
-	va_start(ap, str);
-	for (i = 0; i < 9; i++)
-		params[i] = va_arg(ap, intptr_t);
-	va_end(ap);
 
 	memset(stack, 0, sizeof stack);
 
@@ -770,7 +764,7 @@ tparm(const char *str, ...)
 			break;
 
 		case '?':
-			/* Start conditional — no-op, processing continues. */
+			/* Start conditional - no-op, processing continues. */
 			break;
 
 		case 't': {
@@ -826,7 +820,7 @@ tparm(const char *str, ...)
 		}
 
 		case ';':
-			/* End conditional — no-op. */
+			/* End conditional - no-op. */
 			break;
 
 		default:

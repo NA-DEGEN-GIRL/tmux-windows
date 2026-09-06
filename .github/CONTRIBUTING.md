@@ -93,11 +93,16 @@ tmux -vv -Ltest -fNUL new
 
 - Check if the issue reproduces with the Windows regression tests:
 
+~~~powershell
+ctest --test-dir build -C Debug --output-on-failure
+~~~
+
 ~~~bash
 TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-basic.sh
 ~~~
 
-  The full test suite is in `regress/win32-*.sh` (8 scripts, 230+ assertions).
+  CI runs one native C test plus the full shell suite in
+  `regress/win32-*.sh` (8 scripts, 230+ assertions).
 
 - For IPC or connectivity issues, include the server log
   (`tmux-server-*.log`) — it shows pipe creation, nonce auth, and TCP setup.

@@ -58,6 +58,7 @@ cmake -S . -B build\win32 -G Ninja `
   -DVCPKG_TARGET_TRIPLET=x64-windows-static
 
 cmake --build build\win32 --config Debug
+ctest --test-dir build\win32 --output-on-failure
 ```
 
 빌드 결과물:
@@ -197,6 +198,7 @@ cmake -S . -B build\win32 -G Ninja `
   -DVCPKG_TARGET_TRIPLET=x64-windows-static
 
 cmake --build build\win32 --config Debug
+ctest --test-dir build\win32 --output-on-failure
 ```
 
 The expected local binary is:

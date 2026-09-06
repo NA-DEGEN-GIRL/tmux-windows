@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(tmux C)
 
+include(CTest)
+
 # Require Windows 10 1809+ for ConPTY
 set(CMAKE_SYSTEM_VERSION 10.0.17763.0)
 
@@ -368,6 +370,30 @@ if(MSVC)
     )
     # Use C11
     set_property(TARGET tmux PROPERTY C_STANDARD 11)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(win32-tparm-test
+        regress/win32-tparm.c
+        win32/win32-compat.c
+    )
+    target_include_directories(win32-tparm-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/compat
+        ${CMAKE_CURRENT_SOURCE_DIR}/win32
+    )
+    target_compile_definitions(win32-tparm-test PRIVATE
+        _WIN32
+        _CRT_SECURE_NO_WARNINGS
+        _CRT_NONSTDC_NO_DEPRECATE
+    )
+    target_link_libraries(win32-tparm-test PRIVATE
+        ws2_32
+        advapi32
+        kernel32
+    )
+    set_property(TARGET win32-tparm-test PROPERTY C_STANDARD 11)
+    add_test(NAME win32-tparm COMMAND win32-tparm-test)
 endif()
 
 # Install

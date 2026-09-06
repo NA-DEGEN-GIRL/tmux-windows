@@ -943,7 +943,8 @@ u_int win32_terminfo_count(void);
 
 /* win32-compat.c */
 /* (function declarations are above as #define targets) */
-char *tparm(const char *str, ...);
+char *tparm(const char *, intptr_t, intptr_t, intptr_t, intptr_t, intptr_t,
+    intptr_t, intptr_t, intptr_t, intptr_t);
 
 /* execl / execvp stubs (not real exec; we use CreateProcess). */
 #define execl(path, ...) (-1)

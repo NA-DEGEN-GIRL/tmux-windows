@@ -150,13 +150,23 @@ The remaining ~45 files have 2-12 line changes each, primarily:
 
 ## Regression Tests
 
-CI runs 8 test scripts (230+ assertions). Windows-specific tests are in
-`regress/`. Run with:
+CI runs one native C test plus 8 shell scripts (230+ assertions).
+Windows-specific tests are in `regress/`. Run with:
+
+```powershell
+ctest --test-dir build\win32 --output-on-failure
+```
 
 ```bash
 TEST_TMUX=./build/win32/tmux.exe bash regress/win32-basic.sh
 TEST_TMUX=./build/win32/tmux.exe bash regress/win32-claude-swarm.sh
 ```
+
+### win32-tparm (native C test)
+
+Validates numeric expansion and 64-bit string parameters used by terminal
+capabilities such as OSC 8 hyperlinks. This guards the Codex `/status` path
+that previously crashed the server when a pointer was truncated to 32 bits.
 
 ### win32-basic.sh (8 tests)
 
@@ -196,11 +206,12 @@ skipped (runs via cmd.exe on Windows).
 Port of upstream `conf-syntax.sh`. Validates all 21 `regress/conf/*.conf`
 files parse without error.
 
-### win32-keys.sh (13 tests)
+### win32-keys.sh (15 tests)
 
 Windows-specific key handling: Enter, literals, Space, Tab, Escape, Ctrl-C,
 arrow keys in copy mode, Home/End, PgUp/PgDn, F-keys, Backspace, modifier
-combos, and mouse wheel key names. Tests key effects, not raw codes.
+combos, mouse wheel key names, ASCII punctuation, and UTF-8 key metadata.
+Tests key effects, not raw codes.
 
 ### win32-has-session.sh (3 tests)
 
