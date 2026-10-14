@@ -12,7 +12,7 @@ PATH=/bin:/usr/bin
 TERM=screen
 
 [ -z "$TEST_TMUX" ] && TEST_TMUX=$(readlink -f ../tmux)
-TMUX="$TEST_TMUX -Ltest"
+TMUX="$TEST_TMUX -L${TMUX_TEST_LABEL:-test}"
 $TMUX kill-server 2>/dev/null
 sleep 1
 

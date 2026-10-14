@@ -9,7 +9,7 @@ PATH=/bin:/usr/bin
 TERM=screen
 
 [ -z "$TEST_TMUX" ] && TEST_TMUX=$(readlink -f ../tmux)
-TMUX="$TEST_TMUX -Ltest"
+TMUX="$TEST_TMUX -L${TMUX_TEST_LABEL:-test}"
 $TMUX kill-server 2>/dev/null
 
 OUT=$(mktemp)
@@ -77,11 +77,11 @@ sleep 1
 
 # 7. -S with Unix path: should work as IPC label and emit warning
 # MSYS_NO_PATHCONV prevents Git Bash from translating /tmp to C:/...
-WARN=$(MSYS_NO_PATHCONV=1 $TEST_TMUX -S /tmp/unix-test-sock -fNUL new -d -sunix 2>&1)
+WARN=$(MSYS_NO_PATHCONV=1 $TEST_TMUX -S /tmp/${TMUX_TEST_LABEL:-unix-test}-sock -fNUL new -d -sunix 2>&1)
 echo "$WARN" | grep -qi "unix" || exit 1
-MSYS_NO_PATHCONV=1 $TEST_TMUX -S /tmp/unix-test-sock ls -F '#{session_name}' | tr -d '\r' >$OUT
+MSYS_NO_PATHCONV=1 $TEST_TMUX -S /tmp/${TMUX_TEST_LABEL:-unix-test}-sock ls -F '#{session_name}' | tr -d '\r' >$OUT
 printf "unix\n" | cmp -s $OUT - || exit 1
-MSYS_NO_PATHCONV=1 $TEST_TMUX -S /tmp/unix-test-sock kill-server 2>/dev/null
+MSYS_NO_PATHCONV=1 $TEST_TMUX -S /tmp/${TMUX_TEST_LABEL:-unix-test}-sock kill-server 2>/dev/null
 sleep 1
 
 # 8. default-shell guard: Unix shell path falls back to cmd.exe

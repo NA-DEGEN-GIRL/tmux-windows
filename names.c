@@ -140,6 +140,34 @@ format_window_name(struct window *w)
 	return (name);
 }
 
+#ifdef _WIN32
+/*
+ * For an unquoted absolute Windows path, return the end of the executable
+ * name: the first space after a .exe/.com/.bat/.cmd component, so spaces in
+ * directory names are kept. Returns NULL if this is not such a path.
+ */
+static char *
+parse_window_name_win32_end(char *name)
+{
+	static const char	*exts[] = { ".exe", ".com", ".bat", ".cmd" };
+	char			*ptr;
+	u_int			 i;
+
+	if (!(isalpha((u_char)name[0]) && name[1] == ':') &&
+	    strncmp(name, "\\\\", 2) != 0)
+		return (NULL);
+	for (ptr = strchr(name, ' '); ptr != NULL; ptr = strchr(ptr + 1, ' ')) {
+		if (ptr - name < 4)
+			continue;
+		for (i = 0; i < nitems(exts); i++) {
+			if (strncasecmp(ptr - 4, exts[i], 4) == 0)
+				return (ptr);
+		}
+	}
+	return (NULL);
+}
+#endif
+
 char *
 parse_window_name(const char *in)
 {
@@ -155,6 +183,12 @@ parse_window_name(const char *in)
 
 	while (*name == ' ' || *name == '-')
 		name++;
+#ifdef _WIN32
+	/* Unquoted Windows paths may contain spaces: C:\Program Files\... */
+	if ((ptr = parse_window_name_win32_end(name)) != NULL)
+		*ptr = '\0';
+	else
+#endif
 	if ((ptr = strchr(name, ' ')) != NULL)
 		*ptr = '\0';
 
@@ -167,7 +201,8 @@ parse_window_name(const char *in)
 	}
 
 #ifdef _WIN32
-	if (*name == '/' || *name == '\\') {
+	if (*name == '/' || *name == '\\' ||
+	    (isalpha((u_char)name[0]) && name[1] == ':')) {
 		char *slash = strrchr(name, '/');
 		char *bslash = strrchr(name, '\\');
 		if (bslash != NULL && (slash == NULL || bslash > slash))
@@ -175,6 +210,8 @@ parse_window_name(const char *in)
 		if (slash != NULL && slash[1] != '\0')
 			name = slash + 1;
 	}
+	if (strlen(name) > 4 && strcasecmp(name + strlen(name) - 4, ".exe") == 0)
+		name[strlen(name) - 4] = '\0';
 #else
 	if (*name == '/')
 		name = basename(name);
