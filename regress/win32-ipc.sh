@@ -475,6 +475,61 @@ EOF
 	    fail "llm-router sequence ($R)"
 fi
 
+# 11. Terminal channels nobody claims are queued only up to a limit; the
+# connections beyond it, and the server, must survive being turned away.
+if [ -z "$NODE" ]; then
+	echo "SKIP: node not found"
+else
+	cat >$DIR/ttys.js <<'EOF2'
+// Open terminal channels that no client will ever claim.
+const net = require('net');
+const crypto = require('crypto');
+const [pipe, count] = [process.argv[2], +process.argv[3]];
+function line(sock) {
+	return new Promise((resolve, reject) => {
+		let buf = '';
+		sock.on('data', (d) => {
+			buf += d;
+			const i = buf.indexOf('\n');
+			if (i >= 0)
+				resolve(buf.slice(0, i));
+		});
+		sock.on('error', reject);
+		sock.on('close', () => resolve(null));
+	});
+}
+(async () => {
+	const held = [];
+	let ok = 0;
+	for (let i = 0; i < count; i++) {
+		const p = net.connect(pipe);
+		const reply = await line(p);
+		p.destroy();
+		if (reply === null || reply === 'busy')
+			continue;
+		const [port, nonce] = reply.split(':');
+		const s = net.connect(+port, '127.0.0.1');
+		s.write('TTY:' + crypto.randomBytes(32).toString('hex') + ':' +
+		    nonce + '\n');
+		if (await line(s) !== null)
+			ok++;
+		held.push(s);
+	}
+	console.log(ok);
+	setTimeout(() => process.exit(0), 1000);
+})().catch((e) => { console.log('error ' + e); process.exit(1); });
+EOF2
+	t -fNUL new -d -s ttys </dev/null
+	SP=$(t display -p '#{socket_path}' </dev/null | tr -d '\r')
+	N=$(timeout 60 "$NODE" "$WDIR\\ttys.js" '\\.\pipe\'"$SP" 40 |
+	    tr -d '\r')
+	if [ "$N" = "40" ] && t has-session -t ttys </dev/null; then
+		pass "unclaimed terminal channels"
+	else
+		fail "unclaimed terminal channels: '$N', server $(t ls 2>&1)"
+	fi
+fi
+
 for l in $LABEL $L2 $L3 $LD $LQ; do
 	$TEST_TMUX -L$l kill-server 2>/dev/null
 done
