@@ -243,6 +243,10 @@ set(TMUX_WIN32_SOURCES
     win32/win32-terminfo.c
     win32/win32-tty.c
     win32/win32-regex.c
+    win32/win32-unicode.c
+    win32/tre-regcomp.c
+    win32/tre-regexec.c
+    win32/tre-mem.c
 )
 
 # Optional: utf8proc
@@ -394,6 +398,44 @@ if(BUILD_TESTING)
     )
     set_property(TARGET win32-tparm-test PROPERTY C_STANDARD 11)
     add_test(NAME win32-tparm COMMAND win32-tparm-test)
+endif()
+
+# Unit tests for the Windows text support: terminfo expansion, strftime,
+# fnmatch, regex, UTF-8 and character widths.
+if(BUILD_TESTING)
+    set(TMUX_WIN32_TEXT_SOURCES
+        win32/win32-unicode.c
+        win32/win32-regex.c
+        win32/tre-regcomp.c
+        win32/tre-regexec.c
+        win32/tre-mem.c
+    )
+    target_sources(win32-tparm-test PRIVATE ${TMUX_WIN32_TEXT_SOURCES})
+    target_link_libraries(win32-tparm-test PRIVATE shell32)
+
+    add_executable(win32-text-unit-test
+        regress/win32-text-unit.c
+        win32/win32-compat.c
+        ${TMUX_WIN32_TEXT_SOURCES}
+    )
+    target_include_directories(win32-text-unit-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/compat
+        ${CMAKE_CURRENT_SOURCE_DIR}/win32
+    )
+    target_compile_definitions(win32-text-unit-test PRIVATE
+        _WIN32
+        _CRT_SECURE_NO_WARNINGS
+        _CRT_NONSTDC_NO_DEPRECATE
+    )
+    target_link_libraries(win32-text-unit-test PRIVATE
+        ws2_32
+        advapi32
+        kernel32
+        shell32
+    )
+    set_property(TARGET win32-text-unit-test PROPERTY C_STANDARD 11)
+    add_test(NAME win32-text-unit COMMAND win32-text-unit-test)
 endif()
 
 # Install

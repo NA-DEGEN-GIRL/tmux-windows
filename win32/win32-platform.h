@@ -1046,21 +1046,44 @@ struct passwd *win32_getpwnam(const char *name);
 #define getpwnam(n) win32_getpwnam(n)
 
 /*
- * POSIX thread-safe time functions.
- * MSVC provides _s variants with swapped argument order.
+ * Batch C: time, Unicode, regex, fnmatch and terminfo support
+ * (win32-compat.c, win32-unicode.c and the tre-*.c regex engine).
  */
-static inline struct tm *localtime_r(const time_t *t, struct tm *result) {
-	localtime_s(result, t);
-	return result;
-}
-static inline struct tm *gmtime_r(const time_t *t, struct tm *result) {
-	gmtime_s(result, t);
-	return result;
-}
-static inline char *ctime_r(const time_t *t, char *buf) {
-	ctime_s(buf, 26, t);
-	return buf;
-}
+#include "win32-unicode.h"
+
+/*
+ * POSIX thread-safe time functions and strftime. These accept any time_t
+ * and struct tm and the GNU/BSD strftime extensions without reaching the
+ * CRT invalid parameter handler.
+ */
+struct tm	*win32_localtime_r(const time_t *, struct tm *);
+struct tm	*win32_gmtime_r(const time_t *, struct tm *);
+char		*win32_ctime_r(const time_t *, char *);
+size_t		 win32_strftime(char *, size_t, const char *,
+		     const struct tm *);
+#define localtime_r(t, tm) win32_localtime_r(t, tm)
+#define gmtime_r(t, tm) win32_gmtime_r(t, tm)
+#define ctime_r(t, buf) win32_ctime_r(t, buf)
+#define strftime(s, max, fmt, tm) win32_strftime(s, max, fmt, tm)
+
+/* Make CRT invalid parameters and debug reports log instead of abort. */
+void		 win32_crt_init(void (*)(const char *, ...));
+
+/* Replace argv with UTF-8 from the wide command line. */
+void		 win32_utf8_args(int *, char ***);
+
+/* Both of the above, called first thing in main(). */
+void		 win32_text_init(int *, char ***, void (*)(const char *, ...));
+
+/* Display width of a Unicode code point (wchar_t is only 16 bits). */
+#define wcwidth(wc) win32_wcwidth(wc)
+
+/* fnmatch() extension. */
+#define FNM_LEADING_DIR (1 << 5)
+
+/* Terminfo parameter expansion (ncurses 6.4 tiparm_s). */
+char		*tiparm_s(int, int, const char *, ...);
+#define HAVE_TIPARM_S 1
 
 /* fseeko / ftello: 64-bit file offset support. */
 #define fseeko(f, o, w) _fseeki64(f, o, w)
@@ -1075,10 +1098,6 @@ static inline int usleep(unsigned int usec) {
 	Sleep(usec / 1000);
 	return 0;
 }
-
-/* wcwidth. */
-int win32_wcwidth(wchar_t wc);
-#define wcwidth(wc) win32_wcwidth(wc)
 
 /* getpagesize. */
 static inline int getpagesize(void) {
