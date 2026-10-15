@@ -299,7 +299,17 @@ win32_process_kill(pid_t pid, int sig)
 	}
 	LeaveCriticalSection(&win32_children_lock);
 
-	/* Not our child. */
+	/*
+	 * Not a child that has not been reaped. Job IDs are not process IDs
+	 * (and OpenProcess ignores the low two bits of a process ID, so one
+	 * would open an unrelated process), so a job that is gone is gone.
+	 */
+	if (pid <= 0 || (pid & 3) != 0) {
+		errno = ESRCH;
+		return (-1);
+	}
+
+	/* Some other process, such as the parent of a client. */
 	if (sig == 0) {
 		h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
 		if (h == NULL) {

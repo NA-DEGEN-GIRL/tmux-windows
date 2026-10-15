@@ -488,6 +488,13 @@ job_check_died(pid_t pid, int status)
 	log_debug("job died %p: %s, pid %ld", job, job->cmd, (long) job->pid);
 
 	job->status = status;
+#ifdef _WIN32
+	/*
+	 * The child has been reaped: job_free must not signal its ID, which
+	 * may now belong to something else.
+	 */
+	job->pid = -1;
+#endif
 
 	if (job->state == JOB_CLOSED) {
 		if (job->completecb != NULL)

@@ -395,6 +395,35 @@ if(BUILD_TESTING)
     )
     set_property(TARGET win32-tparm-test PROPERTY C_STANDARD 11)
     add_test(NAME win32-tparm COMMAND win32-tparm-test)
+
+    # kill() and waitpid() of the Windows child registry.
+    add_executable(win32-kill-test
+        regress/win32-kill.c
+        win32/win32-process.c
+        win32/win32-compat.c
+        xmalloc.c
+        compat/asprintf.c
+        compat/reallocarray.c
+        compat/recallocarray.c
+        compat/strndup.c
+        compat/explicit_bzero.c
+    )
+    target_include_directories(win32-kill-test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/compat
+        ${CMAKE_CURRENT_SOURCE_DIR}/win32
+    )
+    get_target_property(TMUX_TEST_DEFINITIONS tmux COMPILE_DEFINITIONS)
+    target_compile_definitions(win32-kill-test PRIVATE
+        ${TMUX_TEST_DEFINITIONS})
+    get_target_property(TMUX_TEST_OPTIONS tmux COMPILE_OPTIONS)
+    if(TMUX_TEST_OPTIONS)
+        target_compile_options(win32-kill-test PRIVATE ${TMUX_TEST_OPTIONS})
+    endif()
+    get_target_property(TMUX_TEST_LIBRARIES tmux LINK_LIBRARIES)
+    target_link_libraries(win32-kill-test PRIVATE ${TMUX_TEST_LIBRARIES})
+    set_property(TARGET win32-kill-test PROPERTY C_STANDARD 11)
+    add_test(NAME win32-kill COMMAND win32-kill-test)
 endif()
 
 # Install
