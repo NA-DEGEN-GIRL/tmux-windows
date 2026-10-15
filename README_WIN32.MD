@@ -137,7 +137,8 @@ environment from their UTF-16 originals, so arguments still arrive intact,
 but file and process APIs keep using the ANSI code page: paths (including the
 directory `tmux.exe` is installed in) must then be representable in it.
 
-Configuration files may use LF or CRLF line endings.
+Configuration files may use LF or CRLF line endings and may start with a
+UTF-8 byte order mark (as Windows PowerShell's `-Encoding utf8` writes).
 
 ## Pane Command And Path
 
@@ -249,8 +250,9 @@ comparisons, boolean operators, literals and `#()` format jobs (run through
 ### win32-conf-syntax.sh (21 config files)
 
 Port of upstream `conf-syntax.sh`. Loads each `regress/conf/*.conf` file with
-LF and with CRLF line endings in a foreground server and checks that it
-parsed (a marker option set after it is present).
+LF line endings, with CRLF and with a UTF-8 byte order mark and CRLF in a
+foreground server and checks that it parsed (a marker option set after it is
+present).
 
 ### win32-keys.sh (15 tests)
 

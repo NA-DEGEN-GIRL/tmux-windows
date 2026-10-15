@@ -751,6 +751,14 @@ cmd_parse_do_buffer(const char *buf, size_t len, struct cmd_parse_input *pi,
 {
 	struct cmd_parse_state	*ps = &parse_state;
 
+#ifdef _WIN32
+	/* Skip the UTF-8 byte order mark many Windows editors write. */
+	if (len >= 3 && memcmp(buf, "\357\273\277", 3) == 0) {
+		buf += 3;
+		len -= 3;
+	}
+#endif
+
 	memset(ps, 0, sizeof *ps);
 	ps->input = pi;
 	ps->buf = buf;

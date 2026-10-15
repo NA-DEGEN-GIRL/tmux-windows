@@ -1,4 +1,4 @@
-/* cmd-parse.y SHA256: 2c4c4c0535297936266c8091786f543890e14d7468467ef20be3eabc00b0ddd1 */
+/* cmd-parse.y SHA256: 5664a78bf8087d6db8f611dc6586d0467569fcb5d507d9249417815ccb860d19 */
 /* A Bison parser, made by GNU Bison 3.8.2.  */
 
 /* Bison implementation for Yacc-like parsers in C
@@ -2153,6 +2153,14 @@ cmd_parse_do_buffer(const char *buf, size_t len, struct cmd_parse_input *pi,
     char **cause)
 {
 	struct cmd_parse_state	*ps = &parse_state;
+
+#ifdef _WIN32
+	/* Skip the UTF-8 byte order mark many Windows editors write. */
+	if (len >= 3 && memcmp(buf, "\357\273\277", 3) == 0) {
+		buf += 3;
+		len -= 3;
+	}
+#endif
 
 	memset(ps, 0, sizeof *ps);
 	ps->input = pi;

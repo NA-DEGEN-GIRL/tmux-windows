@@ -9,9 +9,12 @@
 # not run. A parse error anywhere rejects the whole file, so the marker
 # option set after the %endif is only present if the file parsed.
 #
-# Each file is checked with LF and with CRLF line endings: configuration
-# files written by Windows editors (and checked out with core.autocrlf) use
-# CRLF, and %else, %endif and line continuations used to fail with them.
+# Each file is checked with LF, with CRLF line endings and with CRLF after a
+# UTF-8 byte order mark: configuration files written by Windows editors (and
+# checked out with core.autocrlf) use CRLF, and %else, %endif and line
+# continuations used to fail with them; Windows PowerShell's "-Encoding utf8"
+# and some editors also start the file with a BOM, which used to make the
+# first line an unknown command.
 
 PATH=/bin:/usr/bin
 TERM=screen
@@ -52,8 +55,8 @@ stopped() {
 	! kill -0 $PID 2>/dev/null
 }
 
-# parses FILE [crlf]: load FILE in a foreground server with LF (or CRLF)
-# line endings and check the marker.
+# parses FILE [crlf|bom]: load FILE in a foreground server with LF (or CRLF,
+# or a BOM and CRLF) line endings and check the marker.
 parses() {
 	{
 		echo '%if 0'
@@ -64,6 +67,9 @@ parses() {
 	} >"$OUT/wrap.lf"
 	if [ "$2" = crlf ]; then
 		sed 's/$/\r/' "$OUT/wrap.lf" >"$OUT/wrap.conf"
+	elif [ "$2" = bom ]; then
+		printf '\357\273\277' >"$OUT/wrap.conf"
+		sed 's/$/\r/' "$OUT/wrap.lf" >>"$OUT/wrap.conf"
 	else
 		cp "$OUT/wrap.lf" "$OUT/wrap.conf"
 	fi
@@ -98,10 +104,14 @@ if parses "$OUT/broken.conf" crlf; then
 	echo "FAIL: a syntax error was not detected (CRLF)"
 	exit 1
 fi
+if parses "$OUT/broken.conf" bom; then
+	echo "FAIL: a syntax error was not detected (BOM)"
+	exit 1
+fi
 
 for i in regress/conf/*.conf; do
 	BASENAME=$(basename "$i")
-	for EOL in lf crlf; do
+	for EOL in lf crlf bom; do
 		if parses "$i" $EOL; then
 			echo "PASS: $BASENAME ($EOL)"
 		else
