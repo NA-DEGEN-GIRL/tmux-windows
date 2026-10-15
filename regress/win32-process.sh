@@ -76,7 +76,7 @@ wait_for() {
 
 # Print the first line a pane showed, history included.
 first_line() {
-	$TMUX capture-pane -p -S - -t "$1" | tr -d '\r' | grep -v '^$' | head -1
+	$TMUX capture-pane -p -J -S - -t "$1" | tr -d '\r' | grep -v '^$' | head -1
 }
 
 # Milliseconds of CPU time used by a process.
@@ -179,6 +179,22 @@ R=$(first_line cw2)
 R=$(first_line cw3)
 [ "$R" = 'C:\Windows\System32' ] && pass "forward slash directory" ||
 	fail "forward slash directory: '$R'"
+# A directory longer than MAX_PATH is used by its short name if it has one,
+# otherwise home.
+D=$OUT
+for i in 1 2 3 4 5 6 7 8 9 10; do
+	D=$D/abcdefghijklmnopqrstuvwxyz0123
+done
+mkdir -p $D
+WD=$(cygpath -w $D)
+$TMUX new-window -d -n cw4 -c "$WD" 'cd' ||
+	fail "long directory: new-window failed"
+wait_dead cw4 >/dev/null
+R=$(first_line cw4)
+case "$R" in
+*\\ABCDEF~1|"$HOME_W") pass "long directory" ;;
+*) fail "long directory: '$R'" ;;
+esac
 R=$(MSYS_NO_PATHCONV=1 $TMUX run-shell -c 'C:\no\such\directory' 'cd' |
     tr -d '\r')
 [ "$R" = "$HOME_W" ] && pass "job directory falls back to home" ||

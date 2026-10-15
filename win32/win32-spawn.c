@@ -277,6 +277,42 @@ win32_is_file(const wchar_t *path)
 	    (~attr & FILE_ATTRIBUTE_DIRECTORY));
 }
 
+/*
+ * The current directory of a process is limited to MAX_PATH characters
+ * (less the trailing backslash), so try the short name of a longer path.
+ * Returns NULL if the directory cannot be used.
+ */
+static wchar_t *
+win32_spawn_cwd_short(wchar_t *path)
+{
+	wchar_t	*s;
+	DWORD	 n;
+
+	if (wcslen(path) < MAX_PATH - 1)
+		return (path);
+	n = GetShortPathNameW(path, NULL, 0);
+	if (n != 0) {
+		s = xreallocarray(NULL, n, sizeof *s);
+		if (GetShortPathNameW(path, s, n) < n) {
+			/*
+			 * Long paths can come back as \\?\C:\..., which
+			 * cmd.exe takes for a UNC path.
+			 */
+			if (wcsncmp(s, L"\\\\?\\", 4) == 0 && s[4] != L'\0' &&
+			    s[5] == L':')
+				wmemmove(s, s + 4, wcslen(s + 4) + 1);
+			if (wcslen(s) < MAX_PATH - 1) {
+				free(path);
+				return (s);
+			}
+		}
+		free(s);
+	}
+	free(path);
+	SetLastError(ERROR_FILENAME_EXCED_RANGE);
+	return (NULL);
+}
+
 /* Find a usable working directory, falling back like Unix does. */
 static wchar_t *
 win32_spawn_cwd(const char *cwd, char **cause)
@@ -301,14 +337,17 @@ win32_spawn_cwd(const char *cwd, char **cause)
 		w = win32_to_wide(path);
 		free(path);
 		if (win32_is_dir(w)) {
-			if (i != 0)
-				log_debug("%s: using %s not %s", __func__,
-				    try[i], cwd);
-			return (w);
-		}
+			w = win32_spawn_cwd_short(w);
+			if (w != NULL) {
+				if (i != 0)
+					log_debug("%s: using %s not %s",
+					    __func__, try[i], cwd);
+				return (w);
+			}
+		} else
+			free(w);
 		if (i == 0 && (error = GetLastError()) == ERROR_SUCCESS)
 			error = ERROR_DIRECTORY;
-		free(w);
 	}
 	path = win32_error_string(error);
 	xasprintf(cause, "%s: %s", cwd, path);
