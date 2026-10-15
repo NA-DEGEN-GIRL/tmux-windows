@@ -407,42 +407,14 @@ pid_t
 proc_fork_and_daemon(int *fd)
 {
 #ifdef _WIN32
-	int		 pair[2];
-	char		 cmd[MAX_PATH + 256];
-	char		 exepath[MAX_PATH];
-	STARTUPINFOA	 si;
-	PROCESS_INFORMATION pi;
-
-	if (win32_socketpair(AF_INET, SOCK_STREAM, 0, pair) != 0)
-		fatal("socketpair failed");
-
-	GetModuleFileNameA(NULL, exepath, sizeof exepath);
-
 	/*
-	 * Launch server process detached.
-	 * Pass the socket handle as a command-line argument.
-	 * The server reads this with --server-fd.
+	 * There is no fork: clients start the server as a separate process
+	 * (win32_launch_server) and only call server_start with
+	 * CLIENT_NOFORK, so this is never reached.
 	 */
-	snprintf(cmd, sizeof cmd, "\"%s\" -D", exepath);
-
-	memset(&si, 0, sizeof si);
-	si.cb = sizeof si;
-	memset(&pi, 0, sizeof pi);
-
-	if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE,
-	    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
-	    NULL, NULL, &si, &pi)) {
-		closesocket((SOCKET)pair[0]);
-		closesocket((SOCKET)pair[1]);
-		fatal("CreateProcess failed");
-	}
-
-	CloseHandle(pi.hThread);
-	CloseHandle(pi.hProcess);
-
-	closesocket((SOCKET)pair[1]);
-	*fd = pair[0];
-	return ((pid_t)pi.dwProcessId);
+	(void)fd;
+	fatalx("%s: not supported on Windows", __func__);
+	return (-1);
 #else
 	pid_t	pid;
 	int	pair[2];

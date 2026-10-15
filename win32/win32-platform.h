@@ -521,7 +521,7 @@ static inline ssize_t writev(int fd, const struct iovec *iov, int iovcnt) {
  * POSIX function mappings.
  */
 #define getpid()       ((pid_t)GetCurrentProcessId())
-#define getppid()      ((pid_t)0)
+#define getppid()      win32_getppid()
 #define getuid()       ((uid_t)0)
 #define getgid()       ((gid_t)0)
 #define geteuid()      ((uid_t)0)
@@ -600,11 +600,15 @@ int win32_flock(int fd, int operation);
 #define setproctitle(...) do {} while (0)
 #define HAVE_SETPROCTITLE 1
 
-/* ttyname stub. */
-static inline char *ttyname(int fd) {
-	(void)fd;
-	return "CON";
-}
+/*
+ * ttyname: a console has no device path, so name it after the client process
+ * ("con<pid>"), which keeps client names unique. NULL if fd is not a console.
+ */
+char *win32_ttyname(int fd);
+#define ttyname(fd) win32_ttyname(fd)
+
+/* getppid: the parent process, if it is still running. */
+pid_t win32_getppid(void);
 
 /* getpwuid stub. */
 struct passwd {
@@ -904,16 +908,38 @@ void  win32_process_unwatch(pid_t pid);
 void  win32_process_init(void);
 void  win32_process_cleanup(void);
 pid_t win32_process_spawn(const char *cmd, const char *cwd, int outfd);
-void  win32_launch_server(const char *label);
 
-/* win32-ipc.c */
-int  win32_ipc_create_server(const char *label, uint16_t *port);
-int  win32_ipc_connect(const char *label);
-int  win32_ipc_connect_tty(const char *label, const char *tty_token);
-int  win32_ipc_verify_auth(int fd, const char *label, char *tty_token_out,
-	 size_t tty_token_size);
-void win32_ipc_cleanup(const char *label);
-void win32_generate_tty_token(char *buf, size_t bufsize);
+/*
+ * Batch B: IPC, client and server (win32-ipc.c, win32_launch_server() in
+ * win32-process.c, client.c, server.c, server-client.c, tmux.c).
+ */
+#define WIN32_IPC_OK		0
+#define WIN32_IPC_NOSERVER	1
+#define WIN32_IPC_ERROR		2
+struct win32_ipc_auth {
+	char	buf[256];
+	size_t	len;
+};
+int	 win32_ipc_create_server(const char *, char **);
+void	 win32_ipc_cleanup(void);
+int	 win32_ipc_accept(int);
+int	 win32_ipc_read_auth(int, struct win32_ipc_auth *, char *, size_t,
+	     int *);
+int	 win32_ipc_connect(const char *, const char *, int *, char **);
+void	 win32_generate_tty_token(char *, size_t);
+int	 win32_ipc_socketpair(int [2]);
+HANDLE	 win32_server_lock(const char *);
+void	 win32_server_unlock(HANDLE);
+wchar_t	*win32_ipc_utf8_to_wide(const char *);
+char	*win32_ipc_wide_to_utf8(const wchar_t *);
+char	*win32_ipc_strerror(DWORD);
+HANDLE	 win32_launch_server(int, char **, const char *, char **);
+extern int win32_server_autostart;
+struct client;
+void	 server_client_set_tty_fd(struct client *, int);
+int	 win32_tty_is_console(HANDLE);
+HANDLE	 win32_tty_output(void);
+void	 win32_tty_restore_codepages(void);
 
 /* win32-signal.c */
 void win32_signal_init(void);

@@ -774,11 +774,19 @@ control_start(struct client *c)
 {
 	struct control_state	*cs;
 
+#ifdef _WIN32
+	/*
+	 * Windows cannot pass the client's stdin and stdout: both directions
+	 * use its tty channel socket, c->fd, as -CC does on Unix.
+	 */
+	c->out_fd = -1;
+#else
 	if (c->flags & CLIENT_CONTROLCONTROL) {
 		close(c->out_fd);
 		c->out_fd = -1;
 	} else
 		setblocking(c->out_fd, 0);
+#endif
 	setblocking(c->fd, 0);
 
 	cs = c->control_state = xcalloc(1, sizeof *cs);
@@ -792,6 +800,9 @@ control_start(struct client *c)
 	if (cs->read_event == NULL)
 		fatalx("out of memory");
 
+#ifdef _WIN32
+	cs->write_event = cs->read_event;
+#else
 	if (c->flags & CLIENT_CONTROLCONTROL)
 		cs->write_event = cs->read_event;
 	else {
@@ -800,6 +811,7 @@ control_start(struct client *c)
 		if (cs->write_event == NULL)
 			fatalx("out of memory");
 	}
+#endif
 	bufferevent_setwatermark(cs->write_event, EV_WRITE, CONTROL_BUFFER_LOW,
 	    0);
 
@@ -839,7 +851,11 @@ control_stop(struct client *c)
 	if (cs == NULL)
 		return;
 
+#ifdef _WIN32
+	if (cs->write_event != cs->read_event)
+#else
 	if (~c->flags & CLIENT_CONTROLCONTROL)
+#endif
 		bufferevent_free(cs->write_event);
 	bufferevent_free(cs->read_event);
 

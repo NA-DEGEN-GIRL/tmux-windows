@@ -365,7 +365,10 @@ tty_start_tty(struct tty *tty)
 	event_add(&tty->event_in, NULL);
 
 #ifdef _WIN32
-	win32_tty_raw_mode();
+	/*
+	 * The client puts its own console into raw mode; c->fd is only a
+	 * socket here and the server's console (if any) is not the client's.
+	 */
 #else
 	memcpy(&tio, &tty->tio, sizeof tio);
 	tio.c_iflag &= ~(IXON|IXOFF|ICRNL|INLCR|IGNCR|IMAXBEL|ISTRIP);
@@ -489,7 +492,7 @@ tty_stop_tty(struct tty *tty)
 	 * with a dead tty.
 	 */
 #ifdef _WIN32
-	win32_tty_restore();
+	/* The client restores its own console modes. */
 	tty_raw(tty, tty_term_string_ii(tty->term, TTYC_CSR, 0, tty->sy - 1));
 #else
 	if (ioctl(c->fd, TIOCGWINSZ, &ws) == -1)
@@ -532,7 +535,13 @@ tty_stop_tty(struct tty *tty)
 	if (tty->term->flags & TERM_VT100LIKE)
 		tty_raw(tty, "\033[?2031l");
 
+	/*
+	 * On Windows c->fd is the server's end of a socket, not the client's
+	 * terminal, and must stay non-blocking.
+	 */
+#ifndef _WIN32
 	setblocking(c->fd, 1);
+#endif
 }
 
 void

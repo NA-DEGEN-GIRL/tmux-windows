@@ -217,51 +217,6 @@ win32_process_spawn(const char *cmd, const char *cwd, int outfd)
 	return ((pid_t)pi.dwProcessId);
 }
 
-/*
- * Launch a detached tmux server process.
- * Runs: tmux.exe -D -S "<label>"
- * The -D flag tells tmux to run as a foreground server (no fork).
- */
-void
-win32_launch_server(const char *label)
-{
-	STARTUPINFOA si;
-	PROCESS_INFORMATION pi;
-	char exe[MAX_PATH];
-	char cmdline[MAX_PATH * 2];
-
-	if (GetModuleFileNameA(NULL, exe, sizeof exe) == 0)
-		return;
-
-	snprintf(cmdline, sizeof cmdline,
-	    "\"%s\" -D -S \"%s\"", exe, label);
-
-	memset(&si, 0, sizeof si);
-	si.cb = sizeof si;
-	memset(&pi, 0, sizeof pi);
-
-	/*
-	 * CREATE_BREAKAWAY_FROM_JOB detaches the server from any job object
-	 * the parent belongs to (e.g., sshd's session job). Without this,
-	 * closing an SSH connection kills the tmux server along with all
-	 * processes in the job. Fall back without the flag if the job
-	 * doesn't allow breakaway (ERROR_ACCESS_DENIED).
-	 */
-	if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
-	    DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB,
-	    NULL, NULL, &si, &pi)) {
-		if (GetLastError() != ERROR_ACCESS_DENIED)
-			return;
-		if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
-		    DETACHED_PROCESS | CREATE_NO_WINDOW, NULL, NULL,
-		    &si, &pi))
-			return;
-	}
-
-	CloseHandle(pi.hThread);
-	CloseHandle(pi.hProcess);
-}
-
 void
 win32_process_unwatch(pid_t pid)
 {

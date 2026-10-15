@@ -835,3 +835,86 @@ tparm(const char *str, intptr_t p1, intptr_t p2, intptr_t p3, intptr_t p4,
 	buf[pos] = '\0';
 	return (buf);
 }
+
+/*
+ * ttyname and getppid shims.
+ */
+#include <tlhelp32.h>
+
+/* Get the OS handle behind a CRT descriptor without tripping CRT checks. */
+static HANDLE
+compat_fd_handle(int fd)
+{
+	switch (fd) {
+	case STDIN_FILENO:
+		return (GetStdHandle(STD_INPUT_HANDLE));
+	case STDOUT_FILENO:
+		return (GetStdHandle(STD_OUTPUT_HANDLE));
+	case STDERR_FILENO:
+		return (GetStdHandle(STD_ERROR_HANDLE));
+	}
+	if (fd < 0 || fd >= _getmaxstdio())
+		return (INVALID_HANDLE_VALUE);
+	return ((HANDLE)_get_osfhandle(fd));
+}
+
+/*
+ * A console has no device path. Name it after the process using it, which is
+ * unique while the client runs and so can be used to target the client.
+ */
+char *
+win32_ttyname(int fd)
+{
+	static char	name[32];
+	HANDLE		h;
+	DWORD		mode;
+
+	h = compat_fd_handle(fd);
+	if (h == NULL || h == INVALID_HANDLE_VALUE || !GetConsoleMode(h, &mode)) {
+		errno = ENOTTY;
+		return (NULL);
+	}
+	snprintf(name, sizeof name, "con%lu", (u_long)GetCurrentProcessId());
+	return (name);
+}
+
+/*
+ * Get the parent process ID. Like Unix after the parent has gone, return 1 if
+ * it has exited or its ID now belongs to a younger process.
+ */
+pid_t
+win32_getppid(void)
+{
+	HANDLE		snap, parent;
+	PROCESSENTRY32W	pe;
+	DWORD		self = GetCurrentProcessId(), ppid = 0, code;
+	FILETIME	pc, sc, x1, x2, x3;
+	int		ok;
+
+	snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snap == INVALID_HANDLE_VALUE)
+		return (1);
+	memset(&pe, 0, sizeof pe);
+	pe.dwSize = sizeof pe;
+	if (Process32FirstW(snap, &pe)) {
+		do {
+			if (pe.th32ProcessID == self) {
+				ppid = pe.th32ParentProcessID;
+				break;
+			}
+		} while (Process32NextW(snap, &pe));
+	}
+	CloseHandle(snap);
+	if (ppid == 0)
+		return (1);
+
+	parent = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, ppid);
+	if (parent == NULL)
+		return (1);
+	ok = GetProcessTimes(parent, &pc, &x1, &x2, &x3) &&
+	    GetProcessTimes(GetCurrentProcess(), &sc, &x1, &x2, &x3) &&
+	    CompareFileTime(&pc, &sc) <= 0 &&
+	    GetExitCodeProcess(parent, &code) && code == STILL_ACTIVE;
+	CloseHandle(parent);
+	return (ok ? (pid_t)ppid : 1);
+}
