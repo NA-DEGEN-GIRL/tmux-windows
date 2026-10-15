@@ -242,7 +242,18 @@ function Install-Exe {
 # Add InstallDir to the user PATH in the registry, keeping the stored
 # (unexpanded) entries and the value type.
 function Update-UserPath {
-    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($EnvironmentKey)
+    # Open read-only for a dry run, so not even a missing key is created.
+    $hkcu = [Microsoft.Win32.Registry]::CurrentUser
+    if ($WhatIfPreference) {
+        $key = $hkcu.OpenSubKey($EnvironmentKey, $false)
+        if ($null -eq $key) {
+            $PSCmdlet.ShouldProcess("HKCU\$EnvironmentKey\Path",
+                "Append $InstallDir") | Out-Null
+            return $true
+        }
+    } else {
+        $key = $hkcu.CreateSubKey($EnvironmentKey)
+    }
     try {
         $raw = [string]$key.GetValue('Path', '',
             [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
