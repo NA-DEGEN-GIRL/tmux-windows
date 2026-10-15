@@ -51,7 +51,7 @@ it runs every `regress/win32-*.sh` script (new ones automatically), each
 with its own server label (`TMUX_TEST_LABEL`) and a timeout:
 - `win32-basic.sh` — core session/window/pane operations
 - `win32-claude-swarm.sh` — multi-pane agent team usage and an agent driver sequence
-- `win32-format-strings.sh` — `#{...}` format engine (130 assertions)
+- `win32-format-strings.sh` — `#{...}` format engine (125 assertions)
 - `win32-conf-syntax.sh` — config file parsing (21 files, LF and CRLF)
 - `win32-keys.sh` — key handling (15 tests, tests effects not raw codes)
 - `win32-has-session.sh` — exit code validation

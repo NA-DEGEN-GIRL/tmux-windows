@@ -240,7 +240,7 @@ create/destroy; then an agent driver sequence (`new-session -c`,
 `load-buffer`, `paste-buffer -p`, `send-keys Enter`, `capture-pane -J -S`,
 `delete-buffer`, `kill-session`).
 
-### win32-format-strings.sh (130 assertions)
+### win32-format-strings.sh (125 assertions)
 
 Port of upstream `format-strings.sh`: escapes, substitutions, conditionals,
 comparisons, boolean operators, literals and `#()` format jobs (run through
