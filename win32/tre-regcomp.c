@@ -1697,10 +1697,24 @@ typedef enum {
 #define COPY_REMOVE_TAGS	 1
 #define COPY_MAXIMIZE_FIRST_TAG	 2
 
+/*
+  Limits on the size of a compiled regex (tmux on Windows). Bounded
+  repetitions are expanded into copies of the repeated node, so nested ones
+  such as ((a{0,255}){0,255}){0,255} multiply into millions of nodes, and
+  the compile and match time grow with the number of positions and
+  transitions. tmux runs every regex in its single server thread, so fail
+  such patterns with REG_ESPACE instead of stopping every session.
+  Patterns people write stay far below these limits: [a-z]{1,255} has 257
+  positions and 767 transitions.
+*/
+#define TRE_MAX_NODES		65536
+#define TRE_MAX_POSITIONS	8192
+#define TRE_MAX_TRANSITIONS	8192
+
 static reg_errcode_t
 tre_copy_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
 	     int flags, int *pos_add, tre_tag_direction_t *tag_directions,
-	     tre_ast_node_t **copy, int *max_pos)
+	     tre_ast_node_t **copy, int *max_pos, int *nodes)
 {
   reg_errcode_t status = REG_OK;
   int bottom = tre_stack_num_objects(stack);
@@ -1726,6 +1740,11 @@ tre_copy_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
 	  break;
 	case COPY_RECURSE:
 	  node = tre_stack_pop_voidptr(stack);
+	  if (++*nodes > TRE_MAX_NODES)
+	    {
+	      status = REG_ESPACE;
+	      break;
+	    }
 	  switch (node->type)
 	    {
 	    case LITERAL:
@@ -1855,6 +1874,7 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
   int pos_add_total = 0;
   int max_pos = 0;
   int iter_depth = 0;
+  int nodes = 0;
 
   STACK_PUSHR(stack, voidptr, ast);
   STACK_PUSHR(stack, int, EXPAND_RECURSE);
@@ -1946,7 +1966,7 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
 		    pos_add_save = pos_add;
 		    status = tre_copy_ast(mem, stack, iter->arg, flags,
 					  &pos_add, tag_directions, &copy,
-					  &max_pos);
+					  &max_pos, &nodes);
 		    if (status != REG_OK)
 		      return status;
 		    if (seq1 != NULL)
@@ -1962,7 +1982,8 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
 		    /* No upper limit. */
 		    pos_add_save = pos_add;
 		    status = tre_copy_ast(mem, stack, iter->arg, 0,
-					  &pos_add, NULL, &seq2, &max_pos);
+					  &pos_add, NULL, &seq2, &max_pos,
+					  &nodes);
 		    if (status != REG_OK)
 		      return status;
 		    seq2 = tre_ast_new_iter(mem, seq2, 0, -1, 0);
@@ -1976,7 +1997,8 @@ tre_expand_ast(tre_mem_t mem, tre_stack_t *stack, tre_ast_node_t *ast,
 			tre_ast_node_t *tmp, *copy;
 			pos_add_save = pos_add;
 			status = tre_copy_ast(mem, stack, iter->arg, 0,
-					      &pos_add, NULL, &copy, &max_pos);
+					      &pos_add, NULL, &copy, &max_pos,
+					      &nodes);
 			if (status != REG_OK)
 			  return status;
 			if (seq2 != NULL)
@@ -2803,6 +2825,8 @@ regcomp(regex_t *preg, const char *regex, int cflags)
 			   tag_directions);
   if (errcode != REG_OK)
     ERROR_EXIT(errcode);
+  if (parse_ctx.position > TRE_MAX_POSITIONS)
+    ERROR_EXIT(REG_ESPACE);
 
   /* Add a dummy node for the final state.
      XXX - For certain patterns this dummy node can be optimized away,
@@ -2840,6 +2864,8 @@ regcomp(regex_t *preg, const char *regex, int cflags)
       add += counts[i] + 1;
       counts[i] = 0;
     }
+  if (add > TRE_MAX_TRANSITIONS)
+    ERROR_EXIT(REG_ESPACE);
   transitions = xcalloc((unsigned)add + 1, sizeof(*transitions));
   if (transitions == NULL)
     ERROR_EXIT(REG_ESPACE);

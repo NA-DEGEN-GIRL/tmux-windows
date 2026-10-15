@@ -330,6 +330,34 @@ test_regex(void)
 	}
 	check_int("catastrophic regex time ok", GetTickCount() - start < 5000,
 	    1);
+
+	/*
+	 * Nested bounded repetitions are expanded into copies, so they must
+	 * be refused once they get too big rather than taking minutes and
+	 * gigabytes. Patterns of a sensible size still work.
+	 */
+	start = GetTickCount();
+	check_int("nested repetition 2 levels",
+	    regcomp(&r, "(a{0,255}){0,255}b", REG_EXTENDED), REG_ESPACE);
+	check_int("nested repetition 3 levels",
+	    regcomp(&r, "((a{0,255}){0,255}){0,255}b", REG_EXTENDED),
+	    REG_ESPACE);
+	check_int("nested empty repetition",
+	    regcomp(&r, "(((){0,255}){0,255}){0,255}", REG_EXTENDED),
+	    REG_ESPACE);
+	check_int("nested repetition time ok", GetTickCount() - start < 2000,
+	    1);
+	check_int("large repetition compile",
+	    regcomp(&r, "^[a-z]{1,255}$", REG_EXTENDED|REG_NOSUB), 0);
+	big[255] = '\0';
+	check_int("large repetition match", regexec(&r, big, 0, NULL, 0), 0);
+	big[255] = 'a';
+	big[256] = '\0';
+	check_int("large repetition too long", regexec(&r, big, 0, NULL, 0),
+	    REG_NOMATCH);
+	regfree(&r);
+	check_regex("(ab|cd){2,100}x", "zabcdabx", 0, 0, 0, "1-8:abcdabx");
+	check_regex("(ab|cd){2,100}x", "zabcdabx", 0, 0, 1, "5-7:ab");
 }
 
 static void

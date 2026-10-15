@@ -167,6 +167,16 @@ alive "bad regex"
 A60=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 fmt "regex catastrophic pattern" "0" "#{m/r:(a*)*b,$A60}"
 alive "catastrophic regex"
+# Nested bounded repetitions expand into millions of copies; they must be
+# refused quickly, while a large single repetition still works.
+$TMUX set @p '((a{0,255}){0,255}){0,255}b'
+start=$(date +%s)
+fmt "regex nested repetition refused" "0" "#{m/r:#{@p},${A60}b}"
+[ $(($(date +%s) - start)) -lt 5 ] && pass "regex nested repetition quick" || \
+	fail "regex nested repetition took $(($(date +%s) - start)) seconds"
+alive "nested repetition regex"
+$TMUX set @p '^a{1,255}b$'
+fmt "regex large repetition" "1" "#{m/r:#{@p},${A60}b}"
 
 # --- fnmatch (#{m:...}) ---
 fmt "fnmatch escaped star" "1" '#{m:a\*b,a*b}'
@@ -246,6 +256,13 @@ fmt "copy mode search backward" "2,2" \
 timeout 20 $TMUX send-keys -tab:srch -X search-forward '(a*)*b(a*)*z' || \
 	fail "catastrophic copy mode search hung"
 alive "catastrophic copy mode search"
+start=$(date +%s)
+timeout 20 $TMUX send-keys -tab:srch -X search-forward \
+	'((a{0,255}){0,255}){0,255}b'
+[ $(($(date +%s) - start)) -lt 5 ] && \
+	pass "nested repetition copy mode search quick" || \
+	fail "nested repetition copy mode search took $(($(date +%s) - start)) seconds"
+alive "nested repetition copy mode search"
 $TMUX send-keys -tab:srch -X cancel
 $TMUX kill-window -tab:srch
 
