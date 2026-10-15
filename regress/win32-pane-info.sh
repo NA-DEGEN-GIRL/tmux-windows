@@ -17,7 +17,7 @@ PWSH=$(command -v pwsh 2>/dev/null || command -v powershell 2>/dev/null)
 PATH=/bin:/usr/bin
 TERM=screen
 
-LABEL=${TMUX_TEST_LABEL:-pane-info}
+LABEL=${TMUX_TEST_LABEL:-regress-pane-info}
 TMUX="$TEST_TMUX -L$LABEL"
 $TMUX kill-server 2>/dev/null
 

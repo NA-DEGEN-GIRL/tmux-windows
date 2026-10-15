@@ -8,140 +8,152 @@ PATH=/bin:/usr/bin
 TERM=screen
 
 [ -z "$TEST_TMUX" ] && TEST_TMUX=$(readlink -f ../tmux)
-TMUX="$TEST_TMUX -L${TMUX_TEST_LABEL:-test}"
+LABEL=${TMUX_TEST_LABEL:-regress-layout}
+TMUX="$TEST_TMUX -L$LABEL"
 $TMUX kill-server 2>/dev/null
-sleep 1
 
 FNULL="-fNUL"
 OUT=$(mktemp)
-trap "rm -f $OUT; $TMUX kill-server 2>/dev/null" 0 1 15
+trap 'rm -f "$OUT"; $TMUX kill-server 2>/dev/null' 0 1 15
 FAIL=0
+TFAIL=0
 
 fail() {
 	echo "FAIL: $1"
 	FAIL=1
+	TFAIL=1
+}
+
+# pass NUMBER DESCRIPTION: report a test that had no failures.
+pass() {
+	[ $TFAIL -eq 0 ] && echo "PASS $1: $2"
+	TFAIL=0
+}
+
+# wait_for SECONDS COMMAND...: poll until COMMAND succeeds.
+wait_for() {
+	_end=$(($(date +%s) + $1))
+	shift
+	while ! "$@"; do
+		[ "$(date +%s)" -ge "$_end" ] && return 1
+		sleep 0.2
+	done
+	return 0
+}
+
+server_gone() {
+	$TMUX ls 2>&1 | grep -q "no server running"
+}
+
+restart() {
+	$TMUX kill-server 2>/dev/null
+	wait_for 10 server_gone || fail "server did not exit"
+}
+
+panes() {
+	$TMUX list-panes -tlayout -F "$1" | tr -d '\r' >$OUT
+}
+
+# spread FILE: print "min max" of the numbers in FILE.
+spread() {
+	sort -n "$1" | sed -n '1p;$p' | tr '\n' ' ' | sed 's/ $//'
 }
 
 # --- Test 1: Single pane dimensions match session size ---
 $TMUX $FNULL new -d -slayout -x 120 -y 40 < /dev/null || exit 1
-sleep 1
-
-$TMUX list-panes -tlayout -F '#{pane_width} #{pane_height}' | tr -d '\r' >$OUT
-W=$(awk '{print $1}' $OUT)
-H=$(awk '{print $2}' $OUT)
-# Width should be 120, height = 40 (detached sessions on Windows use full height)
-[ "$W" -eq 120 ] || fail "single pane width $W != 120"
-[ "$H" -eq 40 ] || fail "single pane height $H != 40"
-echo "PASS 1: single pane 120x40"
+panes '#{pane_width} #{pane_height}'
+read W H <$OUT
+# Detached sessions on Windows have no client, so no status line.
+[ "$W" -eq 120 ] || fail "1: single pane width $W != 120"
+[ "$H" -eq 40 ] || fail "1: single pane height $H != 40"
+pass 1 "single pane 120x40"
 
 # --- Test 2: Horizontal split produces two panes with equal width ---
 $TMUX split-window -h -tlayout || exit 1
-sleep 1
-
-$TMUX list-panes -tlayout -F '#{pane_width}' | tr -d '\r' >$OUT
+panes '#{pane_width}'
 W1=$(sed -n '1p' $OUT)
 W2=$(sed -n '2p' $OUT)
-# Both panes should have roughly equal width (total = 120, minus 1 for divider)
 TOTAL=$((W1 + W2 + 1))
-[ "$TOTAL" -eq 120 ] || fail "h-split widths $W1+$W2+1 = $TOTAL != 120"
+[ "$TOTAL" -eq 120 ] || fail "2: h-split widths $W1+$W2+1 = $TOTAL != 120"
 DIFF=$((W1 - W2))
-[ "$DIFF" -ge -1 ] && [ "$DIFF" -le 1 ] || fail "h-split uneven: $W1 vs $W2"
-echo "PASS 2: horizontal split ($W1 + $W2 + 1 = $TOTAL)"
-
-$TMUX kill-session -tlayout
-$TMUX kill-server 2>/dev/null
-sleep 1
+[ "$DIFF" -ge -1 ] && [ "$DIFF" -le 1 ] || fail "2: h-split uneven: $W1 vs $W2"
+pass 2 "horizontal split ($W1 + $W2 + 1 = $TOTAL)"
+restart
 
 # --- Test 3: Vertical split produces two panes with equal height ---
 $TMUX $FNULL new -d -slayout -x 80 -y 40 < /dev/null || exit 1
-sleep 1
 $TMUX split-window -v -tlayout || exit 1
-sleep 1
-
-$TMUX list-panes -tlayout -F '#{pane_height}' | tr -d '\r' >$OUT
+panes '#{pane_height}'
 H1=$(sed -n '1p' $OUT)
 H2=$(sed -n '2p' $OUT)
-# Total = 40 (detached, no status line subtracted), minus 1 for divider
 TOTAL=$((H1 + H2 + 1))
-[ "$TOTAL" -eq 40 ] || fail "v-split heights $H1+$H2+1 = $TOTAL != 40"
+[ "$TOTAL" -eq 40 ] || fail "3: v-split heights $H1+$H2+1 = $TOTAL != 40"
 DIFF=$((H1 - H2))
-[ "$DIFF" -ge -1 ] && [ "$DIFF" -le 1 ] || fail "v-split uneven: $H1 vs $H2"
-echo "PASS 3: vertical split ($H1 + $H2 + 1 = $TOTAL)"
+[ "$DIFF" -ge -1 ] && [ "$DIFF" -le 1 ] || fail "3: v-split uneven: $H1 vs $H2"
+pass 3 "vertical split ($H1 + $H2 + 1 = $TOTAL)"
+restart
 
-$TMUX kill-session -tlayout
-$TMUX kill-server 2>/dev/null
-sleep 1
-
-# --- Test 4: Four-pane tiled layout ---
+# --- Test 4: Four panes in two columns of two ---
 $TMUX $FNULL new -d -slayout -x 100 -y 40 < /dev/null || exit 1
-sleep 1
 $TMUX split-window -h -tlayout || exit 1
 $TMUX split-window -v -tlayout:0.0 || exit 1
 $TMUX split-window -v -tlayout:0.2 || exit 1
-sleep 1
 
-COUNT=$($TMUX list-panes -tlayout | wc -l)
-[ "$COUNT" -eq 4 ] || { fail "4-pane: got $COUNT panes"; exit 1; }
-
-# All widths should sum to 100 (accounting for dividers)
-$TMUX list-panes -tlayout -F '#{pane_width} #{pane_height}' | tr -d '\r' >$OUT
-WSUM=0
-while read w h; do
-	WSUM=$((WSUM + w))
-done < $OUT
-# 2 columns, 1 divider between them
-# Each column has 2 panes stacked. Left and right widths + 1 divider = 100
-echo "PASS 4: four-pane layout ($COUNT panes)"
+panes '#{pane_left} #{pane_top} #{pane_width} #{pane_height}'
+COUNT=$(wc -l < $OUT)
+[ "$COUNT" -eq 4 ] || { fail "4: got $COUNT panes"; exit 1; }
+# Two columns: the left one at x 0, the right one after a divider; each
+# column is two panes and a divider tall and the columns fill the width.
+LEFTS=$(awk '{print $1}' $OUT | sort -nu | tr '\n' ' ')
+set -- $LEFTS
+if [ $# -ne 2 ] || [ "$1" -ne 0 ]; then
+	fail "4: pane columns start at $LEFTS"
+else
+	XR=$2
+	for X in 0 $XR; do
+		CW=$(awk -v x=$X '$1 == x {print $3}' $OUT | sort -u)
+		CH=$(awk -v x=$X '$1 == x {s += $4} END {print s + 1}' $OUT)
+		[ "$(echo "$CW" | wc -l)" -eq 1 ] ||
+		    fail "4: column at $X has widths $(echo $CW)"
+		[ "$CH" -eq 40 ] || fail "4: column at $X is $CH rows, not 40"
+	done
+	WL=$(awk '$1 == 0 {print $3; exit}' $OUT)
+	WR=$(awk -v x=$XR '$1 == x {print $3; exit}' $OUT)
+	[ "$XR" -eq $((WL + 1)) ] || fail "4: right column at $XR, not $((WL + 1))"
+	[ $((WL + 1 + WR)) -eq 100 ] ||
+	    fail "4: column widths $WL+1+$WR != 100"
+fi
+pass 4 "four-pane layout"
 
 # --- Test 5: select-layout tiled ---
 $TMUX select-layout -tlayout tiled || exit 1
-sleep 1
-
-$TMUX list-panes -tlayout -F '#{pane_width} #{pane_height}' | tr -d '\r' >$OUT
-# In tiled layout, all panes should be approximately equal
-LINES=$(wc -l < $OUT)
-[ "$LINES" -eq 4 ] || { fail "tiled: got $LINES panes"; exit 1; }
-
-WMIN=999; WMAX=0; HMIN=999; HMAX=0
-while read w h; do
-	[ "$w" -lt "$WMIN" ] && WMIN=$w
-	[ "$w" -gt "$WMAX" ] && WMAX=$w
-	[ "$h" -lt "$HMIN" ] && HMIN=$h
-	[ "$h" -gt "$HMAX" ] && HMAX=$h
-done < $OUT
-WDIFF=$((WMAX - WMIN))
-HDIFF=$((HMAX - HMIN))
-[ "$WDIFF" -le 1 ] || fail "tiled width spread: $WMIN-$WMAX (diff $WDIFF)"
-[ "$HDIFF" -le 1 ] || fail "tiled height spread: $HMIN-$HMAX (diff $HDIFF)"
-echo "PASS 5: tiled layout (w:$WMIN-$WMAX h:$HMIN-$HMAX)"
+panes '#{pane_width}'
+[ "$(wc -l < $OUT)" -eq 4 ] || { fail "5: got $(wc -l < $OUT) panes"; exit 1; }
+set -- $(spread $OUT)
+[ $(($2 - $1)) -le 1 ] || fail "5: tiled width spread $1-$2"
+WS="$1-$2"
+panes '#{pane_height}'
+set -- $(spread $OUT)
+[ $(($2 - $1)) -le 1 ] || fail "5: tiled height spread $1-$2"
+pass 5 "tiled layout (w:$WS h:$1-$2)"
 
 # --- Test 6: select-layout even-horizontal ---
 $TMUX select-layout -tlayout even-horizontal || exit 1
-sleep 1
-
-$TMUX list-panes -tlayout -F '#{pane_width}' | tr -d '\r' >$OUT
-WMIN=999; WMAX=0
-while read w; do
-	[ "$w" -lt "$WMIN" ] && WMIN=$w
-	[ "$w" -gt "$WMAX" ] && WMAX=$w
-done < $OUT
-WDIFF=$((WMAX - WMIN))
-[ "$WDIFF" -le 1 ] || fail "even-horizontal spread: $WMIN-$WMAX (diff $WDIFF)"
-echo "PASS 6: even-horizontal layout (w:$WMIN-$WMAX)"
+panes '#{pane_width}'
+set -- $(spread $OUT)
+[ $(($2 - $1)) -le 1 ] || fail "6: even-horizontal spread $1-$2"
+TOTAL=$(awk '{s += $1} END {print s + NR - 1}' $OUT)
+[ "$TOTAL" -eq 100 ] || fail "6: even-horizontal widths total $TOTAL"
+pass 6 "even-horizontal layout (w:$1-$2)"
 
 # --- Test 7: select-layout even-vertical ---
 $TMUX select-layout -tlayout even-vertical || exit 1
-sleep 1
-
-$TMUX list-panes -tlayout -F '#{pane_height}' | tr -d '\r' >$OUT
-HMIN=999; HMAX=0
-while read h; do
-	[ "$h" -lt "$HMIN" ] && HMIN=$h
-	[ "$h" -gt "$HMAX" ] && HMAX=$h
-done < $OUT
-HDIFF=$((HMAX - HMIN))
-[ "$HDIFF" -le 1 ] || fail "even-vertical spread: $HMIN-$HMAX (diff $HDIFF)"
-echo "PASS 7: even-vertical layout (h:$HMIN-$HMAX)"
+panes '#{pane_height}'
+set -- $(spread $OUT)
+[ $(($2 - $1)) -le 1 ] || fail "7: even-vertical spread $1-$2"
+TOTAL=$(awk '{s += $1} END {print s + NR - 1}' $OUT)
+[ "$TOTAL" -eq 40 ] || fail "7: even-vertical heights total $TOTAL"
+pass 7 "even-vertical layout (h:$1-$2)"
 
 $TMUX kill-server 2>/dev/null
 

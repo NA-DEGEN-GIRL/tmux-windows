@@ -22,7 +22,7 @@ done
 
 PATH=/bin:/usr/bin
 TERM=screen
-LABEL=${TMUX_TEST_LABEL:-unicode}
+LABEL=${TMUX_TEST_LABEL:-regress-unicode}
 TMUX="$TEST_TMUX -L$LABEL"
 $TMUX kill-server 2>/dev/null
 
@@ -98,6 +98,7 @@ fi
 # The pane runs a bash script that reads one line and prints its bytes and
 # the bytes of an environment variable set with -e.
 cat >"$OUT/read.sh" <<'EOF'
+echo READY
 IFS= read -r line
 printf 'LINE %s\n' "$(printf '%s' "$line" | od -An -tx1)"
 printf 'ENV %s\n' "$(printf '%s' "$TMUXTEST_VALUE" | od -An -tx1)"
@@ -107,7 +108,7 @@ READER=$(cygpath -w "$OUT/read.sh")
 ENVVALUE='값 😀'
 $TMUX new-window -d -t main: -n reader -e "TMUXTEST_VALUE=$ENVVALUE" -- \
     "$BASH_W" "$READER" || fail "new-window reader"
-sleep 1
+wait_for 10 pane_line main:reader READY || fail "reader did not start"
 SENT='한글 입력'
 $TMUX send-keys -t main:reader -l "$SENT"
 $TMUX send-keys -t main:reader Enter
@@ -131,13 +132,14 @@ fi
 if [ -n "$PYTHON" ]; then
 	cat >"$OUT/read.py" <<'EOF'
 import sys, time
+print('READY', flush=True)
 line = sys.stdin.buffer.readline().rstrip(b'\r\n')
 print('LINE ' + ' '.join('%02x' % b for b in line), flush=True)
 time.sleep(60)
 EOF
 	$TMUX new-window -d -t main: -n emoji -- "$(cygpath -w "$PYTHON")" \
 	    "$(cygpath -w "$OUT/read.py")" || fail "new-window emoji"
-	sleep 1
+	wait_for 10 pane_line main:emoji READY || fail "python did not start"
 	SENT='a 한글 😀 b'
 	$TMUX send-keys -t main:emoji -l "$SENT"
 	$TMUX send-keys -t main:emoji Enter
