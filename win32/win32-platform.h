@@ -910,9 +910,13 @@ void  win32_process_cleanup(void);
 pid_t win32_process_spawn(const char *cmd, const char *cwd, int outfd);
 
 /*
- * Batch B: IPC, client and server (win32-ipc.c, win32_launch_server() in
- * win32-process.c, client.c, server.c, server-client.c, tmux.c).
+ * Batch B: IPC, client and server (win32-ipc.c, which now also holds
+ * win32_launch_server(), client.c, server.c, server-client.c, tmux.c).
  */
+#ifndef TMUX_LOCK_CMD
+/* There is no lock(1): lock the workstation, which also asks for a password. */
+#define TMUX_LOCK_CMD "rundll32.exe user32.dll,LockWorkStation"
+#endif
 #define WIN32_IPC_OK		0
 #define WIN32_IPC_NOSERVER	1
 #define WIN32_IPC_ERROR		2
