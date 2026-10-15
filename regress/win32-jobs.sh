@@ -247,6 +247,35 @@ $TMUX -c 'exit 5' </dev/null
 RC=$?
 [ $RC -eq 5 ] && pass "tmux -c exit status" || fail "tmux -c exit status: $RC"
 
+# 13. Job output is UTF-8 whatever the system code page (a hidden console
+# uses the OEM one, such as 949): a Korean file name listed by cmd.exe's
+# dir and by PowerShell, in run-shell and in #(). The name is not in any
+# command line, so this does not depend on how the client reads arguments.
+mkdir "$OUT/ko" && mkdir "$OUT/ko/폴더" || fail "cannot make Korean directory"
+UTF8=$(printf '폴더' | od -An -tx1 | tr -s ' \n' ' ')
+hex() {
+	tr -d '\r\n' | od -An -tx1 | tr -s ' \n' ' '
+}
+R=$($TMUX run-shell -c "$WOUT\\ko" 'dir /b' | hex)
+[ "$R" = "$UTF8" ] && pass "run-shell output is UTF-8" ||
+	fail "run-shell output is not UTF-8: $R (expected $UTF8)"
+WPS_EXE=$(cygpath -w "$PS_EXE")
+R=$($TMUX run-shell -c "$WOUT\\ko" \
+    "\"$WPS_EXE\" -NoProfile -NonInteractive -Command Get-ChildItem -Name" |
+    hex)
+[ "$R" = "$UTF8" ] && pass "PowerShell job output is UTF-8" ||
+	fail "PowerShell job output is not UTF-8: $R (expected $UTF8)"
+R=
+n=0
+while [ $n -lt 5 ]; do
+	R=$(cd "$OUT/ko" && $TMUX display -p 'A:#(dir /b)' \; run -d 1.2 \; \
+	    display -p 'B:#(dir /b)' | tr -d '\r' | sed -n 's/^B://p' | hex)
+	[ "$R" = "$UTF8" ] && break
+	n=$((n + 1))
+done
+[ "$R" = "$UTF8" ] && pass "#() output is UTF-8" ||
+	fail "#() output is not UTF-8: $R (expected $UTF8)"
+
 $TMUX has -t s || fail "server is not running at the end"
 $TMUX kill-server 2>/dev/null
 

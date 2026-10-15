@@ -20,6 +20,9 @@
 
 #include "tmux.h"
 
+/* Variable holding a job's command for win32_cmdline_utf8. */
+#define WIN32_JOB_VARIABLE "TMUX_WIN32_JOB"
+
 /* A growable wide string. */
 struct wbuf {
 	wchar_t	*s;
@@ -725,9 +728,51 @@ win32_quote_batch(struct wbuf *b, const wchar_t *arg)
 	return (0);
 }
 
+/*
+ * A job has a console of its own without a window, which has the OEM code
+ * page (such as 949). cmd.exe and other console programs use that for what
+ * they write to a pipe, but tmux wants UTF-8. The code page is per console
+ * and must be changed before cmd.exe starts, because it reads it once, and
+ * the console only exists once the child is running. So run the command as
+ *
+ *	cmd /d /v:on /s /c "chcp 65001>nul & cmd /s /c !TMUX_WIN32_JOB!"
+ *
+ * with "command" in TMUX_WIN32_JOB: delayed expansion is done after the
+ * line has been parsed, so the second cmd.exe gets exactly the command line
+ * it would otherwise have had, and its exit status is the one returned.
+ * Returns 1 if it did.
+ */
+static int
+win32_cmdline_utf8(struct win32_spawn *sp, struct wbuf *b)
+{
+	wchar_t	sysdir[MAX_PATH], *chcp;
+	UINT	n;
+	int	found;
+
+	if (~sp->flags & WIN32_SPAWN_UTF8 || GetOEMCP() == CP_UTF8)
+		return (0);
+	n = GetSystemDirectoryW(sysdir, nitems(sysdir));
+	if (n == 0 || n >= nitems(sysdir))
+		return (0);
+	chcp = xcalloc(n + sizeof "\\chcp.com", sizeof *chcp);
+	wcscpy(chcp, sysdir);
+	wcscat(chcp, L"\\chcp.com");
+	found = win32_is_file(chcp);
+	if (found) {
+		wbuf_add(b, L" /d /v:on /s /c \"");
+		win32_quote_argv0(b, chcp);
+		wbuf_add(b, L" 65001>nul 2>nul & ");
+		win32_quote_argv0(b, sp->app);
+		wbuf_add(b, L" /s /c !" L"" WIN32_JOB_VARIABLE L"!\"");
+	}
+	free(chcp);
+	return (found);
+}
+
 /* Build the command line to run a shell command with a shell. */
 static int
-win32_cmdline_shell(struct win32_spawn *sp, struct wbuf *b, char **cause)
+win32_cmdline_shell(struct win32_spawn *sp, struct wbuf *b, int *wrapped,
+    char **cause)
 {
 	wchar_t	*wcmd;
 
@@ -739,6 +784,11 @@ win32_cmdline_shell(struct win32_spawn *sp, struct wbuf *b, char **cause)
 	win32_quote_argv0(b, sp->app);
 	if (sp->cmd == NULL)
 		return (0);	/* login shell */
+
+	if (win32_program_is(sp->app, L"cmd") && win32_cmdline_utf8(sp, b)) {
+		*wrapped = 1;
+		return (0);
+	}
 
 	wcmd = win32_to_wide(sp->cmd);
 	if (win32_program_is(sp->app, L"cmd")) {
@@ -867,13 +917,36 @@ win32_environ_block(struct environ *env)
 	return (b.s);
 }
 
+/* Make an environ from this process's environment. */
+static struct environ *
+win32_environ_current(void)
+{
+	struct environ	*env = environ_create();
+	wchar_t		*block, *w;
+	char		*s;
+
+	block = GetEnvironmentStringsW();
+	if (block == NULL)
+		return (env);
+	for (w = block; *w != L'\0'; w += wcslen(w) + 1) {
+		if (*w == L'=')
+			continue;	/* =C:=C:\dir and the like */
+		s = win32_from_wide(w);
+		environ_put(env, s, 0);
+		free(s);
+	}
+	FreeEnvironmentStringsW(block);
+	return (env);
+}
+
 /* Work out the program, command line, environment and directory to use. */
 int
 win32_spawn_prepare(struct win32_spawn *sp, char **cause)
 {
 	struct wbuf	 b = { 0 };
+	struct environ	*env = NULL;
 	char		*cwd;
-	int		 error;
+	int		 error, wrapped = 0;
 
 	*cause = NULL;
 	sp->app = sp->cmdline = sp->envblock = sp->wcwd = NULL;
@@ -892,7 +965,7 @@ win32_spawn_prepare(struct win32_spawn *sp, char **cause)
 	if (sp->cmd == NULL && sp->argc > 0)
 		error = win32_cmdline_argv(sp, &b, cause);
 	else
-		error = win32_cmdline_shell(sp, &b, cause);
+		error = win32_cmdline_shell(sp, &b, &wrapped, cause);
 	if (error != 0) {
 		free(b.s);
 		win32_spawn_free(sp);
@@ -900,8 +973,18 @@ win32_spawn_prepare(struct win32_spawn *sp, char **cause)
 	}
 	sp->cmdline = b.s;
 
+	if (wrapped) {
+		/* The command is passed in the environment, so one is needed. */
+		if (sp->env == NULL)
+			sp->env = env = win32_environ_current();
+		environ_set(sp->env, WIN32_JOB_VARIABLE, 0, "\"%s\"", sp->cmd);
+	}
 	if (sp->env != NULL)
 		sp->envblock = win32_environ_block(sp->env);
+	if (env != NULL) {
+		environ_free(env);
+		sp->env = NULL;
+	}
 	return (0);
 }
 

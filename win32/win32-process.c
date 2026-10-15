@@ -627,6 +627,8 @@ win32_process_spawn(struct win32_spawn *sp, int stdio, int *fd,
 	int			 sv[2];
 	char			*msg;
 
+	/* What tmux reads from a job must be UTF-8. */
+	sp->flags |= WIN32_SPAWN_UTF8;
 	if (win32_spawn_prepare(sp, cause) != 0)
 		return (-1);
 	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, sv) != 0) {

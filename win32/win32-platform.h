@@ -1098,6 +1098,8 @@ struct win32_spawn {
 	char		**argv;
 	struct environ	 *env;		/* child environment, NULL to inherit */
 	const char	 *cwd;		/* working directory, NULL to inherit */
+	int		  flags;
+#define WIN32_SPAWN_UTF8 0x1	/* cmd.exe's console code page is UTF-8 */
 
 	wchar_t		 *app;		/* resolved program */
 	wchar_t		 *cmdline;	/* CreateProcessW command line */
