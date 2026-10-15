@@ -21,7 +21,7 @@
 #include "compat.h"
 
 int
-utf8proc_wcwidth(wchar_t wc)
+utf8proc_wcwidth(utf8_wchar wc)
 {
 	int	cat;
 
@@ -37,7 +37,7 @@ utf8proc_wcwidth(wchar_t wc)
 }
 
 int
-utf8proc_mbtowc(wchar_t *pwc, const char *s, size_t n)
+utf8proc_mbtowc(utf8_wchar *pwc, const char *s, size_t n)
 {
 	utf8proc_ssize_t	slen;
 
@@ -49,13 +49,13 @@ utf8proc_mbtowc(wchar_t *pwc, const char *s, size_t n)
 	 * slen < 0 indicates an error
 	 */
 	slen = utf8proc_iterate(s, n, (utf8proc_int32_t*)pwc);
-	if (*pwc == (wchar_t)-1 || slen < 0)
+	if (*pwc == (utf8_wchar)-1 || slen < 0)
 		return (-1);
 	return (slen);
 }
 
 int
-utf8proc_wctomb(char *s, wchar_t wc)
+utf8proc_wctomb(char *s, utf8_wchar wc)
 {
 	if (s == NULL)
 		return (0);

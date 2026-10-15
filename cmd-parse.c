@@ -3015,7 +3015,12 @@ unicode:
 		yyerror("invalid \\%c argument", type);
 		return (0);
 	}
+#ifdef _WIN32
+	/* The CRT wctomb() only takes 16-bit characters. */
+	mlen = win32_utf8_encode(tmp, m);
+#else
 	mlen = wctomb(m, tmp);
+#endif
 	if (mlen <= 0 || mlen > (int)sizeof m) {
 		yyerror("invalid \\%c argument", type);
 		return (0);

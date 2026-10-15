@@ -262,7 +262,12 @@ key_string_lookup_string(const char *string)
 			return (KEYC_UNKNOWN);
 		if (u < 32)
 			return (u);
+#ifdef _WIN32
+		/* The CRT wctomb() only takes 16-bit characters. */
+		mlen = win32_utf8_encode(u, m);
+#else
 		mlen = wctomb(m, u);
+#endif
 		if (mlen <= 0 || mlen > MB_LEN_MAX)
 			return (KEYC_UNKNOWN);
 		m[mlen] = '\0';

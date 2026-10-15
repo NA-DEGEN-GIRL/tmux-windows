@@ -346,7 +346,7 @@ target_link_libraries(tmux PRIVATE
 # utf8proc
 if(TMUX_ENABLE_UTF8PROC AND utf8proc_FOUND)
     target_link_libraries(tmux PRIVATE utf8proc)
-    target_compile_definitions(tmux PRIVATE ENABLE_UTF8PROC)
+    target_compile_definitions(tmux PRIVATE HAVE_UTF8PROC)
 endif()
 
 if(TMUX_ENABLE_SIXEL)
