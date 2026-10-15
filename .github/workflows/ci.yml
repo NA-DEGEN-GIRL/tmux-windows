@@ -10,6 +10,10 @@ on:
 jobs:
   build-and-test:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [Debug, Release]
     env:
       VCPKG_DEFAULT_TRIPLET: x64-windows-static
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
@@ -25,7 +29,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-x64-windows-static-${{ hashFiles('CMakeLists.txt') }}
+          key: vcpkg-x64-windows-static-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
           restore-keys: vcpkg-x64-windows-static-
 
       - name: Setup vcpkg and install dependencies
@@ -36,85 +40,43 @@ jobs:
       - name: Configure CMake
         shell: pwsh
         run: |
+          # A release tag names the version tmux -V reports.
+          $version = ''
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $version = $env:GITHUB_REF_NAME.Substring(1)
+          }
           cmake -S . -B build -G "Visual Studio 17 2022" `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows-static
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DTMUX_VERSION="$version"
 
-      - name: Build Debug
+      - name: Build ${{ matrix.config }}
         shell: pwsh
         run: |
-          cmake --build build --config Debug
-
-      - name: Build Release
-        shell: pwsh
-        run: |
-          cmake --build build --config Release
+          cmake --build build --config ${{ matrix.config }}
 
       - name: Run native unit tests
         shell: pwsh
         run: |
-          ctest --test-dir build -C Debug --output-on-failure
+          ctest --test-dir build -C ${{ matrix.config }} -L unit --output-on-failure
 
-      - name: Run basic regression tests
+      # Every regress/win32-*.sh script, each under its own server label, so
+      # no step needs to kill tmux processes by name.
+      - name: Run regression tests
         shell: bash
+        timeout-minutes: 45
         run: |
-          TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-basic.sh
+          TEST_TMUX=./build/${{ matrix.config }}/tmux.exe \
+            TMUX_TEST_PREFIX=ci-${{ matrix.config }} \
+            sh regress/win32-run-all.sh
 
-      - name: Run Claude swarm simulation tests
-        shell: bash
-        run: |
-          TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-claude-swarm.sh
-
-      - name: Run format string tests
-        shell: bash
-        run: |
-          taskkill //F //IM tmux.exe 2>/dev/null || true
-          sleep 2
-          TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-format-strings.sh
-
-      - name: Run config syntax tests
-        shell: bash
-        run: |
-          taskkill //F //IM tmux.exe 2>/dev/null || true
-          sleep 2
-          TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-conf-syntax.sh
-
-      - name: Run key handling tests
-        shell: bash
-        timeout-minutes: 5
-        run: |
-          taskkill //F //IM tmux.exe 2>/dev/null || true
-          sleep 2
-          TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-keys.sh
-
-      - name: Run has-session tests
-        shell: bash
-        run: |
-          taskkill //F //IM tmux.exe 2>/dev/null || true
-          sleep 2
-          TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-has-session.sh
-
-      - name: Run layout tests
-        shell: bash
-        run: |
-          taskkill //F //IM tmux.exe 2>/dev/null || true
-          sleep 2
-          TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-layout.sh
-
-      - name: Run control client tests
-        shell: bash
-        run: |
-          taskkill //F //IM tmux.exe 2>/dev/null || true
-          sleep 2
-          TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-control-client.sh
-
-      - name: Upload build artifacts
+      - name: Upload tested tmux.exe
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: tmux-windows-debug
+          name: tmux-windows-${{ matrix.config }}
           path: |
-            build/Debug/tmux.exe
+            build/${{ matrix.config }}/tmux.exe
 
   release:
     needs: build-and-test
@@ -122,40 +84,14 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
-    env:
-      VCPKG_DEFAULT_TRIPLET: x64-windows-static
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Create vcpkg binary cache directory
-        shell: pwsh
-        run: New-Item -ItemType Directory -Path "${{ env.VCPKG_DEFAULT_BINARY_CACHE }}" -Force
-
-      - name: Restore vcpkg binary cache
-        uses: actions/cache@v4
+      # Ship exactly the Release binary the tests ran against.
+      - name: Download tested Release build
+        uses: actions/download-artifact@v4
         with:
-          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-x64-windows-static-${{ hashFiles('CMakeLists.txt') }}
-          restore-keys: vcpkg-x64-windows-static-
-
-      - name: Setup vcpkg and install dependencies
-        shell: pwsh
-        run: |
-          vcpkg install libevent:x64-windows-static
-
-      - name: Configure CMake
-        shell: pwsh
-        run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows-static
-
-      - name: Build Release
-        shell: pwsh
-        run: |
-          cmake --build build --config Release
+          name: tmux-windows-Release
+          path: release-staging
 
       - name: Package release
         shell: pwsh
@@ -164,14 +100,11 @@ jobs:
           $zipName = "tmux-windows-$version.zip"
           $stagingDir = "release-staging"
 
-          New-Item -ItemType Directory -Path $stagingDir
-          Copy-Item build/Release/tmux.exe $stagingDir/
-
-          Compress-Archive -Path "$stagingDir/*" -DestinationPath $zipName
+          Compress-Archive -Path "$stagingDir/tmux.exe" -DestinationPath $zipName
 
           # Generate SHA256
           $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash
-          "$hash  $zipName" | Out-File -Encoding UTF8 "$zipName.sha256"
+          "$hash  $zipName" | Out-File -Encoding ascii "$zipName.sha256"
 
           echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
           echo "ZIP_HASH=$hash" >> $env:GITHUB_ENV
@@ -193,11 +126,11 @@ jobs:
             3. Run `tmux new-session`
 
             ### Requirements
-            - Windows 10 version 1809+
+            - Windows 10 version 1903+ (1809 works with limitations, see README_WIN32.MD)
             - Windows Terminal or VT-capable console
 
             ### What's included
             - `tmux.exe` (statically linked, single-file)
 
-            See [README_WIN32.MD](https://github.com/arndawg/tmux-windows/blob/master/README_WIN32.MD) for full documentation.
+            See [README_WIN32.MD](${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/README_WIN32.MD) for full documentation.
           generate_release_notes: true
