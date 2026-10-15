@@ -20,14 +20,16 @@ FNULL="-fNUL"
 OUT=$(mktemp)
 trap "rm -f $OUT; $TMUX kill-server 2>/dev/null" 0 1 15
 FAIL=0
-SHELL_CMD="${COMSPEC:-cmd.exe} /K"
+# Run cmd.exe itself (two arguments, so not through the default shell,
+# which is Git Bash when SHELL is set).
+CMD_EXE="${COMSPEC:-cmd.exe}"
 
 fail() {
 	echo "FAIL: $1"
 	FAIL=1
 }
 
-$TMUX $FNULL new -d -skeys -x 120 -y 24 "$SHELL_CMD" < /dev/null || exit 1
+$TMUX $FNULL new -d -skeys -x 120 -y 24 -- "$CMD_EXE" //K < /dev/null || exit 1
 sleep 1
 
 # --- Test 1: Enter key executes commands ---
