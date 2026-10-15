@@ -517,4 +517,79 @@ osdep_event_init(void)
 	return (event_init());
 }
 
+/* Convert a UTF-16 string to a newly allocated UTF-8 string. */
+static char *
+osdep_utf8(const wchar_t *ws)
+{
+	char	*s;
+	int	 len;
+
+	len = WideCharToMultiByte(CP_UTF8, 0, ws, -1, NULL, 0, NULL, NULL);
+	if (len <= 0)
+		return (xstrdup(""));
+	s = xmalloc(len);
+	WideCharToMultiByte(CP_UTF8, 0, ws, -1, s, len, NULL, NULL);
+	return (s);
+}
+
+/*
+ * The application manifest makes UTF-8 the process code page on Windows 10
+ * 1903 and later, so argv and the CRT environment are already UTF-8. Older
+ * Windows ignores it and converts both to the ANSI code page, losing
+ * anything it cannot represent; rebuild them from the UTF-16 originals.
+ * Must be called after win32_init_environ().
+ */
+void
+win32_utf8_main_args(int *argc, char ***argv)
+{
+	wchar_t		**wargv, *wenv, *w;
+	char		**nargv, **nenv;
+	int		  wargc, i, local = 0;
+	u_int		  n;
+
+	if (GetACP() == CP_UTF8)
+		return;
+
+	/*
+	 * Have the CRT split the UTF-16 command line with the same rules it
+	 * used for argv; CommandLineToArgvW treats some quotes differently.
+	 */
+	wargv = NULL;
+	if (_configure_wide_argv(_crt_argv_unexpanded_arguments) == 0) {
+		wargv = __wargv;
+		wargc = __argc;
+	}
+	if (wargv == NULL) {
+		wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+		local = 1;
+	}
+	if (wargv != NULL && wargc == *argc) {
+		nargv = xreallocarray(NULL, wargc + 1, sizeof *nargv);
+		for (i = 0; i < wargc; i++)
+			nargv[i] = osdep_utf8(wargv[i]);
+		nargv[wargc] = NULL;
+		*argv = nargv;
+	}
+	if (local && wargv != NULL)
+		LocalFree(wargv);
+
+	wenv = GetEnvironmentStringsW();
+	if (wenv != NULL) {
+		n = 0;
+		nenv = NULL;
+		for (w = wenv; *w != L'\0'; w += wcslen(w) + 1) {
+			/* Skip the hidden per-drive directories (=C:=C:\). */
+			if (*w == L'=')
+				continue;
+			nenv = xreallocarray(nenv, n + 2, sizeof *nenv);
+			nenv[n++] = osdep_utf8(w);
+		}
+		if (nenv != NULL) {
+			nenv[n] = NULL;
+			environ = nenv;
+		}
+		FreeEnvironmentStringsW(wenv);
+	}
+}
+
 #endif /* _WIN32 */

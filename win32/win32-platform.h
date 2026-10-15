@@ -1097,4 +1097,10 @@ static inline int getpagesize(void) {
 #endif
 #endif
 
+/*
+ * Batch D: UTF-8 argv and environment for Windows versions that ignore the
+ * manifest's UTF-8 code page (osdep-windows.c).
+ */
+void win32_utf8_main_args(int *, char ***);
+
 #endif /* WIN32_PLATFORM_H */
