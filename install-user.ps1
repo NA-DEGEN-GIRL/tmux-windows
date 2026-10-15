@@ -181,8 +181,10 @@ function Stop-InstalledTmux {
         } | Sort-Object -Unique)
 
     if ($KeepSessions) {
-        Write-Host ("Keeping {0} running tmux server(s); they keep using the " +
-            "old tmux.exe until they exit.") -f $sockets.Count
+        # Parenthesized: after a command argument, -f would bind to
+        # Write-Host -ForegroundColor instead of the format operator.
+        Write-Host (("Keeping {0} running tmux server(s); they keep using " +
+            "the old tmux.exe until they exit.") -f $sockets.Count)
         return
     }
 

@@ -9,7 +9,11 @@
 # - a relative -InstallDir is taken from the current location;
 # - servers running from the tmux.exe being replaced are stopped (whatever
 #   their label) and servers from another tmux.exe are left alone;
-# - -KeepSessions installs while a server is still running.
+# - -KeepSessions installs while a server is still running, moving the
+#   running tmux.exe aside, and says how many servers it kept;
+# - the installer exits with status 0.
+# Each reinstall uses a tmux.exe that differs from the installed one (bytes
+# appended), so a copy that silently failed cannot pass.
 # Runs under every PowerShell found (Windows PowerShell 5.1 and pwsh).
 
 [ -z "$TEST_TMUX" ] && TEST_TMUX=$(readlink -f ../tmux)
@@ -38,6 +42,9 @@ SCRIPT=$(cygpath -w "$(pwd)/install-user.ps1")
 KEY="Software\\tmux-windows-test-$LABEL"
 OUT=$(mktemp -d)
 OUT_W=$(cygpath -w "$OUT")
+# Two runnable tmux.exe files that differ from TEST_TMUX and each other.
+cat "$TEST_TMUX" >"$OUT/v2.exe" && printf 'tmux-install-v2' >>"$OUT/v2.exe"
+cat "$TEST_TMUX" >"$OUT/v3.exe" && printf 'tmux-install-v3' >>"$OUT/v3.exe"
 EXE_W=$(cygpath -w "$TEST_TMUX")
 for i in $LABEL-a $LABEL.b $LABEL-other; do
 	"$TEST_TMUX" -L$i kill-server 2>/dev/null
@@ -55,11 +62,16 @@ psh() {
 	    -Command "$1" </dev/null 2>&1 | tr -d '\r'
 }
 
-# install ARGS...: run install-user.ps1 with the scratch registry key.
+# install ARGS...: run install-user.ps1 with the scratch registry key and
+# BUILD (default the tested tmux.exe); print its output without CRs and
+# return its exit status.
 install() {
 	"$PSH" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \
-	    "$SCRIPT" -BuildExe "$EXE_W" -EnvironmentKey "$KEY" "$@" \
-	    </dev/null 2>&1 | tr -d '\r'
+	    "$SCRIPT" -BuildExe "$(cygpath -w "${BUILD:-$TEST_TMUX}")" \
+	    -EnvironmentKey "$KEY" "$@" </dev/null >"$OUT/raw" 2>&1
+	_rc=$?
+	tr -d '\r' <"$OUT/raw"
+	return $_rc
 }
 
 reg_path() {
@@ -121,7 +133,8 @@ for PSH in $SHELLS; do
 	fi
 
 	# --- Install and PATH update ---
-	install -InstallDir "$OUT_W\\inst" >"$OUT/log"
+	install -InstallDir "$OUT_W\\inst" >"$OUT/log" ||
+	    fail "$N: install failed: $(cat "$OUT/log")"
 	WANT="ExpandString|%USERPROFILE%\\tmux-fake-bin;C:\\tmux-fake-dir;$OUT_W\\inst"
 	if ! cmp -s "$TEST_TMUX" "$OUT/inst/tmux.exe"; then
 		fail "$N: tmux.exe not installed: $(cat "$OUT/log")"
@@ -153,13 +166,17 @@ for PSH in $SHELLS; do
 	    fail "$N: start server b"
 	"$TEST_TMUX" -L$LABEL-other -fNUL new -d -s o </dev/null ||
 	    fail "$N: start other server"
-	install -InstallDir "$OUT_W\\inst" -NoPathUpdate >"$OUT/log"
-	if ! wait_for 10 no_server "$TEST_TMUX" $LABEL-a ||
+	BUILD=$OUT/v2.exe install -InstallDir "$OUT_W\\inst" -NoPathUpdate \
+	    >"$OUT/log"
+	RC=$?
+	if [ $RC -ne 0 ]; then
+		fail "$N: install with running servers exited $RC: $(cat "$OUT/log")"
+	elif ! wait_for 10 no_server "$TEST_TMUX" $LABEL-a ||
 	    ! wait_for 10 no_server "$TEST_TMUX" $LABEL.b; then
 		fail "$N: servers of the installed tmux.exe still running: $(cat "$OUT/log")"
 	elif ! "$TEST_TMUX" -L$LABEL-other has -t o 2>/dev/null; then
 		fail "$N: a server of another tmux.exe was stopped"
-	elif ! cmp -s "$TEST_TMUX" "$INST"; then
+	elif ! cmp -s "$OUT/v2.exe" "$INST"; then
 		fail "$N: tmux.exe not replaced: $(cat "$OUT/log")"
 	else
 		echo "PASS: $N stops only servers of the replaced tmux.exe"
@@ -168,18 +185,29 @@ for PSH in $SHELLS; do
 	# --- -KeepSessions ---
 	"$INST" -L$LABEL-a -fNUL new -d -s a </dev/null ||
 	    fail "$N: start server a again"
-	install -InstallDir "$OUT_W\\inst" -NoPathUpdate -KeepSessions \
-	    >"$OUT/log"
-	if ! "$INST" -L$LABEL-a has -t a 2>/dev/null; then
+	BUILD=$OUT/v3.exe install -InstallDir "$OUT_W\\inst" -NoPathUpdate \
+	    -KeepSessions >"$OUT/log"
+	RC=$?
+	OLD=$(ls "$OUT/inst/" | grep '^tmux\.exe\.old-' | head -1)
+	if [ $RC -ne 0 ]; then
+		fail "$N: -KeepSessions exited $RC: $(cat "$OUT/log")"
+	elif ! "$INST" -L$LABEL-a has -t a 2>/dev/null; then
 		fail "$N: -KeepSessions stopped the server"
-	elif ! cmp -s "$TEST_TMUX" "$INST"; then
+	elif ! cmp -s "$OUT/v3.exe" "$INST"; then
 		fail "$N: -KeepSessions did not install: $(cat "$OUT/log")"
+	elif [ -z "$OLD" ] || ! cmp -s "$OUT/v2.exe" "$OUT/inst/$OLD"; then
+		fail "$N: -KeepSessions did not move the running tmux.exe aside: $(ls "$OUT/inst")"
+	elif ! grep -q '^Keeping 1 running tmux server(s)' "$OUT/log"; then
+		fail "$N: -KeepSessions message wrong: $(cat "$OUT/log")"
 	else
 		echo "PASS: $N -KeepSessions"
 	fi
 	"$INST" -L$LABEL-a kill-server 2>/dev/null
 	wait_for 10 no_server "$TEST_TMUX" $LABEL-a
 	"$TEST_TMUX" -L$LABEL-other kill-server 2>/dev/null
+	# The moved-aside tmux.exe can go once its server has exited.
+	wait_for 10 sh -c 'rm -f "$1"/tmux.exe.old-*; ! ls "$1" |
+	    grep -q "^tmux\.exe\.old-"' sh "$OUT/inst"
 done
 
 if [ $FAIL -eq 0 ]; then
