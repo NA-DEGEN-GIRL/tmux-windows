@@ -85,6 +85,12 @@ win32_signal_init(void)
 		signal_pipe[1] = (SOCKET)sv[1];
 	}
 
+	/*
+	 * The server is started with CREATE_NEW_PROCESS_GROUP, which makes it
+	 * ignore Ctrl-C, and every process it starts would inherit that, so
+	 * Ctrl-C in a pane would not interrupt anything. Turn it back on.
+	 */
+	SetConsoleCtrlHandler(NULL, FALSE);
 	SetConsoleCtrlHandler(ctrl_handler, TRUE);
 
 	/*
