@@ -31,7 +31,13 @@ ctrl_handler(DWORD type)
 	case CTRL_CLOSE_EVENT:
 	case CTRL_LOGOFF_EVENT:
 	case CTRL_SHUTDOWN_EVENT:
+		/*
+		 * The process is terminated as soon as this returns, so give
+		 * the event loop time to handle SIGTERM and exit by itself;
+		 * Windows kills the process anyway after its own timeout.
+		 */
 		win32_signal_notify(SIGTERM);
+		Sleep(10000);
 		return TRUE;
 	}
 	return FALSE;
@@ -81,12 +87,15 @@ win32_signal_init(void)
 
 	SetConsoleCtrlHandler(ctrl_handler, TRUE);
 
-	/* Initialize last known size. */
+	/*
+	 * Initialize last known size. Without a console (the server runs
+	 * detached) there is nothing to resize, so do not poll.
+	 */
 	hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-	if (GetConsoleScreenBufferInfo(hConsole, &csbi)) {
-		last_cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
-		last_rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
-	}
+	if (!GetConsoleScreenBufferInfo(hConsole, &csbi))
+		return;
+	last_cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+	last_rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
 
 	signal_shutdown = 0;
 	resize_thread = CreateThread(NULL, 0, resize_poll_thread, NULL, 0, NULL);
