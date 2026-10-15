@@ -3,8 +3,9 @@ project(tmux C)
 
 include(CTest)
 
-# Require Windows 10 1809+ for ConPTY
-set(CMAKE_SYSTEM_VERSION 10.0.17763.0)
+# The minimum Windows version (10 1809, for ConPTY) is set by _WIN32_WINNT and
+# NTDDI_VERSION in win32/win32-platform.h; win32/tmux.manifest makes UTF-8 the
+# process code page on Windows 10 1903 and later.
 
 # Use MSVC runtime
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -12,6 +13,34 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 # Options
 option(TMUX_ENABLE_UTF8PROC "Enable utf8proc support" OFF)
 option(TMUX_ENABLE_SIXEL "Enable sixel image support" OFF)
+option(TMUX_WIN32_MANIFEST
+    "Embed win32/tmux.manifest (UTF-8 code page, long paths)" ON)
+option(TMUX_ALLOW_STALE_CMD_PARSE
+    "Build with a cmd-parse.c that does not match cmd-parse.y" OFF)
+
+# Version: the upstream version from configure.ac with a Windows suffix,
+# unless TMUX_VERSION is given (the release workflow passes the tag).
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/configure.ac" TMUX_AC_INIT
+    REGEX "^AC_INIT\\(")
+if(NOT TMUX_AC_INIT MATCHES "^AC_INIT\\(\\[tmux\\], *\\[?([^],)]+)")
+    message(FATAL_ERROR "cannot find the tmux version in configure.ac")
+endif()
+set(TMUX_VERSION_SUFFIX "-win32" CACHE STRING
+    "Suffix appended to the configure.ac version")
+set(TMUX_VERSION "" CACHE STRING
+    "Version reported by tmux -V (empty: configure.ac version and suffix)")
+if(TMUX_VERSION)
+    set(TMUX_PACKAGE_VERSION "${TMUX_VERSION}")
+else()
+    set(TMUX_PACKAGE_VERSION "${CMAKE_MATCH_1}${TMUX_VERSION_SUFFIX}")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/configure.ac")
+
+# Sources are UTF-8: do not read them in the system code page.
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
 
 # Find libevent
 find_package(libevent CONFIG QUIET)
@@ -36,25 +65,61 @@ if(NOT libevent_FOUND AND NOT Libevent_FOUND AND NOT unofficial-libevent_FOUND)
     endif()
 endif()
 
-# cmd-parse.c generation from cmd-parse.y
-# Try to find bison (WinFlexBison on Windows)
+# cmd-parse.c is generated from cmd-parse.y by bison. With bison (or
+# win_bison from WinFlexBison) on PATH it is generated into the build
+# directory; otherwise the committed copy is used, whose first line records
+# the SHA256 of the grammar it was generated from. Refresh the committed copy
+# after changing cmd-parse.y with:
+#   cmake --build <build dir> --target update-cmd-parse
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/cmd-parse.y" TMUX_CMD_PARSE_Y)
+string(REPLACE "\r\n" "\n" TMUX_CMD_PARSE_Y "${TMUX_CMD_PARSE_Y}")
+string(SHA256 TMUX_CMD_PARSE_Y_SHA256 "${TMUX_CMD_PARSE_Y}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmd-parse.y"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmd-parse.c")
 find_program(BISON_EXECUTABLE NAMES win_bison bison)
 if(BISON_EXECUTABLE)
+    set(TMUX_CMD_PARSE_C "${CMAKE_CURRENT_BINARY_DIR}/cmd-parse.c")
     add_custom_command(
-        OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/cmd-parse.c
-        COMMAND ${BISON_EXECUTABLE} -o ${CMAKE_CURRENT_SOURCE_DIR}/cmd-parse.c
-                ${CMAKE_CURRENT_SOURCE_DIR}/cmd-parse.y
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/cmd-parse.y
+        OUTPUT "${TMUX_CMD_PARSE_C}"
+        COMMAND "${CMAKE_COMMAND}"
+            "-DBISON_EXECUTABLE=${BISON_EXECUTABLE}"
+            "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/cmd-parse.y"
+            "-DOUTPUT=${TMUX_CMD_PARSE_C}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/win32/cmd-parse.cmake"
+        DEPENDS
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmd-parse.y"
+            "${CMAKE_CURRENT_SOURCE_DIR}/win32/cmd-parse.cmake"
         COMMENT "Generating cmd-parse.c from cmd-parse.y"
     )
+    add_custom_target(update-cmd-parse
+        COMMAND "${CMAKE_COMMAND}"
+            "-DBISON_EXECUTABLE=${BISON_EXECUTABLE}"
+            "-DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/cmd-parse.y"
+            "-DOUTPUT=${CMAKE_CURRENT_SOURCE_DIR}/cmd-parse.c"
+            -DNO_LINES=ON
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/win32/cmd-parse.cmake"
+        COMMENT "Regenerating the committed cmd-parse.c"
+    )
+    message(STATUS "Generating cmd-parse.c with ${BISON_EXECUTABLE}")
 else()
-    if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cmd-parse.c)
-        message(FATAL_ERROR
-            "bison/win_bison not found and cmd-parse.c does not exist.\n"
-            "Install WinFlexBison via vcpkg: vcpkg install winflex")
-    else()
-        message(STATUS "Using pre-generated cmd-parse.c")
+    set(TMUX_CMD_PARSE_C "${CMAKE_CURRENT_SOURCE_DIR}/cmd-parse.c")
+    file(STRINGS "${TMUX_CMD_PARSE_C}" TMUX_CMD_PARSE_C_HEADER
+        LIMIT_COUNT 1)
+    if(NOT TMUX_CMD_PARSE_C_HEADER MATCHES
+        "cmd-parse.y SHA256: ${TMUX_CMD_PARSE_Y_SHA256}")
+        set(TMUX_CMD_PARSE_STALE
+            "cmd-parse.c was not generated from the current cmd-parse.y "
+            "and bison/win_bison is not on PATH. Install WinFlexBison and "
+            "run 'cmake --build <build dir> --target update-cmd-parse', or "
+            "configure with -DTMUX_ALLOW_STALE_CMD_PARSE=ON.")
+        if(TMUX_ALLOW_STALE_CMD_PARSE)
+            message(WARNING ${TMUX_CMD_PARSE_STALE})
+        else()
+            message(FATAL_ERROR ${TMUX_CMD_PARSE_STALE})
+        endif()
     endif()
+    message(STATUS "Using pre-generated cmd-parse.c")
 endif()
 
 # Core tmux source files
@@ -97,7 +162,7 @@ set(TMUX_SOURCES
     cmd-move-window.c
     cmd-new-session.c
     cmd-new-window.c
-    cmd-parse.c
+    ${TMUX_CMD_PARSE_C}
     cmd-paste-buffer.c
     cmd-pipe-pane.c
     cmd-queue.c
@@ -290,6 +355,11 @@ add_executable(tmux
     ${TMUX_WIN32_SOURCES}
 )
 
+# Application manifest: UTF-8 process code page and long path awareness.
+if(TMUX_WIN32_MANIFEST)
+    target_sources(tmux PRIVATE win32/tmux.manifest)
+endif()
+
 # Compiler definitions
 target_compile_definitions(tmux PRIVATE
     _WIN32
@@ -297,8 +367,7 @@ target_compile_definitions(tmux PRIVATE
     _CRT_SECURE_NO_WARNINGS
     _CRT_NONSTDC_NO_DEPRECATE
     PACKAGE_NAME="tmux"
-    PACKAGE_VERSION="3.6a-win32"
-    TMUX_CONF="${CMAKE_INSTALL_PREFIX}/etc/tmux.conf"
+    PACKAGE_VERSION="${TMUX_PACKAGE_VERSION}"
     # Functions provided by compat/ source files we compile:
     # Do NOT define HAVE_X for these - compat.h needs to declare them
     # and the compat .c files provide implementations.
@@ -394,6 +463,36 @@ if(BUILD_TESTING)
     )
     set_property(TARGET win32-tparm-test PROPERTY C_STANDARD 11)
     add_test(NAME win32-tparm COMMAND win32-tparm-test)
+    set_tests_properties(win32-tparm PROPERTIES LABELS unit)
+
+    # The regress/win32-*.sh scripts need Git for Windows' bash; never pick
+    # up the WSL launcher in System32. Each script gets its own server label
+    # so they can run in parallel with each other and with real sessions.
+    find_program(TMUX_TEST_BASH bash
+        HINTS "$ENV{ProgramFiles}/Git/bin" "$ENV{ProgramW6432}/Git/bin"
+        NO_DEFAULT_PATH)
+    if(NOT TMUX_TEST_BASH)
+        find_program(TMUX_TEST_BASH bash)
+    endif()
+    if(TMUX_TEST_BASH AND NOT TMUX_TEST_BASH MATCHES "[Ss]ystem32")
+        file(GLOB TMUX_REGRESS_SCRIPTS CONFIGURE_DEPENDS
+            "${CMAKE_CURRENT_SOURCE_DIR}/regress/win32-*.sh")
+        list(FILTER TMUX_REGRESS_SCRIPTS EXCLUDE REGEX "win32-run-all[.]sh$")
+        foreach(script ${TMUX_REGRESS_SCRIPTS})
+            get_filename_component(name "${script}" NAME_WE)
+            string(REGEX REPLACE "^win32-" "" label "${name}")
+            add_test(NAME ${name} COMMAND "${TMUX_TEST_BASH}" "${script}"
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+            set_tests_properties(${name} PROPERTIES
+                LABELS regress
+                TIMEOUT 900
+                SKIP_RETURN_CODE 77
+                ENVIRONMENT
+                "TEST_TMUX=$<TARGET_FILE:tmux>;TMUX_TEST_LABEL=ctest-${label}")
+        endforeach()
+    else()
+        message(STATUS "Git bash not found: regress scripts not added to ctest")
+    endif()
 endif()
 
 # Install
@@ -402,7 +501,7 @@ install(TARGETS tmux RUNTIME DESTINATION bin)
 # Print summary
 message(STATUS "")
 message(STATUS "tmux Windows build configuration:")
-message(STATUS "  Version:    3.6a-win32")
+message(STATUS "  Version:    ${TMUX_PACKAGE_VERSION}")
 message(STATUS "  UTF8PROC:   ${TMUX_ENABLE_UTF8PROC}")
 message(STATUS "  SIXEL:      ${TMUX_ENABLE_SIXEL}")
 message(STATUS "")
