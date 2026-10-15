@@ -8,6 +8,7 @@
 
 # Programs used below, found before PATH is reset.
 CMD_EXE=$(cygpath -w "$(command -v cmd.exe)")
+PS_EXE=$(command -v powershell.exe)
 PWSH_EXE=$(command -v pwsh.exe 2>/dev/null)
 [ -n "$PWSH_EXE" ] && PWSH_EXE=$(cygpath -w "$PWSH_EXE")
 NODE_EXE=$(command -v node.exe 2>/dev/null)
@@ -133,6 +134,26 @@ wait_file $OUT/pipe.txt pipe-marker && pass "pipe-pane captures output" ||
 	fail "pipe-pane captures output"
 $TMUX pipe-pane -t s
 $TMUX has -t s || fail "server died after pipe-pane"
+# Closing the pipe gives the command end of file, so it exits.
+n=0
+while [ $n -lt 20 ]; do
+	"$PS_EXE" -NoProfile -NonInteractive -Command "@(Get-CimInstance Win32_Process -Filter \"Name='cat.exe'\" | Where-Object { \$_.CommandLine -like '*$WOUT*' }).Count" |
+	    tr -d '\r' | grep -qx 0 && break
+	sleep 0.5
+	n=$((n + 1))
+done
+[ $n -lt 20 ] && pass "pipe-pane command gets end of file" ||
+	fail "pipe-pane command gets end of file"
+
+# pipe-pane -I: the command's output is typed into the pane.
+$TMUX pipe-pane -t s -I 'echo echo pipe-in-marker'
+n=0
+while [ $n -lt 20 ]; do
+	pane_text s | grep -qx 'pipe-in-marker' && break
+	sleep 0.5
+	n=$((n + 1))
+done
+[ $n -lt 20 ] && pass "pipe-pane -I" || fail "pipe-pane -I"
 
 # 6. copy-pipe: the selection goes to the command's stdin, then EOF.
 $TMUX send-keys -t s 'echo COPY-ME-123' Enter
