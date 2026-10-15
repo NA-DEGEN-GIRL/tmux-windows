@@ -40,7 +40,25 @@ RB_GENERATE_STATIC(environ, environ_entry, entry, environ_cmp);
 static int
 environ_cmp(struct environ_entry *envent1, struct environ_entry *envent2)
 {
+#ifdef _WIN32
+	const u_char	*name1 = (const u_char *)envent1->name;
+	const u_char	*name2 = (const u_char *)envent2->name;
+	int		 c1, c2;
+
+	/*
+	 * Windows variable names are case-insensitive: Path and PATH are one
+	 * variable. Compare as Windows sorts an environment block.
+	 */
+	do {
+		c1 = (*name1 >= 'a' && *name1 <= 'z') ? *name1 - 32 : *name1;
+		c2 = (*name2 >= 'a' && *name2 <= 'z') ? *name2 - 32 : *name2;
+		name1++;
+		name2++;
+	} while (c1 == c2 && c1 != '\0');
+	return (c1 - c2);
+#else
 	return (strcmp(envent1->name, envent2->name));
+#endif
 }
 
 /* Initialise the environment. */
