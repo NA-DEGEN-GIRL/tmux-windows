@@ -35,6 +35,18 @@ regsub_copy(char **buf, ssize_t *len, const char *text, size_t start, size_t end
 	(*len) += add;
 }
 
+#ifdef _WIN32
+static size_t
+regsub_char_size(const char *s)
+{
+	uint32_t	c;
+	int		n;
+
+	n = win32_utf8_decode_lax(s, 4, &c);
+	return (n > 0 ? n : 1);
+}
+#endif
+
 static void
 regsub_expand(char **buf, ssize_t *len, const char *with, const char *text,
     regmatch_t *m, u_int n)
@@ -91,6 +103,21 @@ regsub(const char *pattern, const char *with, const char *text, int flags)
 		 */
 		regsub_copy(&buf, &len, text, last, m[0].rm_so + start);
 
+#ifdef _WIN32
+		/*
+		 * For anchored patterns, replace the first match only, even if
+		 * it is empty (so s/^/x/ prefixes the text rather than dropping
+		 * the first character).
+		 */
+		if (*pattern == '^') {
+			regsub_expand(&buf, &len, with, text + start, m,
+			    nitems(m));
+			last = start + m[0].rm_eo;
+			regsub_copy(&buf, &len, text, last, end);
+			break;
+		}
+#endif
+
 		/*
 		 * If the last match was empty and this one isn't (it is either
 		 * later or has matched text), expand this match. If it is
@@ -107,15 +134,23 @@ regsub(const char *pattern, const char *with, const char *text, int flags)
 			empty = 0;
 		} else {
 			last = start + m[0].rm_eo;
+#ifdef _WIN32
+			/* Move on one UTF-8 character rather than one byte. */
+			start += m[0].rm_eo +
+			    regsub_char_size(text + start + m[0].rm_eo);
+#else
 			start += m[0].rm_eo + 1;
+#endif
 			empty = 1;
 		}
 
+#ifndef _WIN32
 		/* Stop now if anchored to start. */
 		if (*pattern == '^') {
 			regsub_copy(&buf, &len, text, start, end);
 			break;
 		}
+#endif
 	}
 	buf[len] = '\0';
 
