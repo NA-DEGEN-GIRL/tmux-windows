@@ -26,26 +26,43 @@ Never use `TMP` as a shell variable name in test scripts — it shadows Windows 
 
 ## Build Commands
 
+Ninja builds one configuration per directory (it ignores `--config`):
+Debug in `build\win32`, Release in `build\release`. The first configure
+needs `-G Ninja -DCMAKE_BUILD_TYPE=Debug|Release` and the vcpkg toolchain
+(see README_WIN32.MD); afterwards `cmake --build <dir>` is enough.
+
 ```bash
 # Debug build (from Git Bash)
 taskkill //F //IM tmux.exe 2>/dev/null; sleep 2
-powershell.exe -NoProfile -Command "& { cmd.exe /c '\"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat\" x64 >nul 2>&1 && cmake --build C:\src\tmux\build --config Debug' }"
+powershell.exe -NoProfile -Command "& { cmd.exe /c '\"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat\" x64 >nul 2>&1 && cmake --build build\win32' }"
 
-# Run tests
-TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-basic.sh
+# Release build
+powershell.exe -NoProfile -Command "& { cmd.exe /c '\"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat\" x64 >nul 2>&1 && cmake --build build\release' }"
+
+# Run all regression scripts, or one
+TEST_TMUX=./build/win32/tmux.exe sh regress/win32-run-all.sh
+TEST_TMUX=./build/win32/tmux.exe bash regress/win32-basic.sh
 ```
 
 ## Test Suite
 
-CI runs 8 test scripts from `regress/`:
+CI runs `regress/win32-run-all.sh` against the Debug and the Release build;
+it runs every `regress/win32-*.sh` script (new ones automatically), each
+with its own server label (`TMUX_TEST_LABEL`) and a timeout:
 - `win32-basic.sh` — core session/window/pane operations
-- `win32-claude-swarm.sh` — multi-session concurrent usage
-- `win32-format-strings.sh` — `#{...}` format engine (171 assertions)
-- `win32-conf-syntax.sh` — config file parsing (21 files)
-- `win32-keys.sh` — key handling (12 tests, tests effects not raw codes)
+- `win32-claude-swarm.sh` — multi-pane agent team usage and an agent driver sequence
+- `win32-format-strings.sh` — `#{...}` format engine (130 assertions)
+- `win32-conf-syntax.sh` — config file parsing (21 files, LF and CRLF)
+- `win32-keys.sh` — key handling (15 tests, tests effects not raw codes)
 - `win32-has-session.sh` — exit code validation
 - `win32-layout.sh` — pane dimension verification (7 tests)
-- `win32-control-client.sh` — complex pane operations (6 tests)
+- `win32-control-client.sh` — control mode and complex pane operations (7 tests)
+- `win32-unicode.sh` — Korean/UTF-8 arguments, names, paths and input
+- `win32-pane-info.sh` — pane_current_command/path and automatic-rename
+- `win32-install.sh` — install-user.ps1 against a scratch directory and registry key
+
+ctest runs the native `win32-tparm` test (label `unit`) and registers the
+scripts too (label `regress`).
 
 ## Winget Package Submission
 
