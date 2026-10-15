@@ -670,6 +670,9 @@ struct spawn_editor_state {
 	pid_t			 pid;
 	spawn_finish_edit_cb	 cb;
 	void			*arg;
+#ifdef _WIN32
+	int			 crlf;
+#endif
 };
 
 static void
@@ -765,9 +768,11 @@ spawn_editor_finish(struct window_pane *wp)
 	/*
 	 * Windows editors usually save with CRLF line endings: turn them back
 	 * into LF so the buffer does not gain a CR on every line (which would
-	 * be pasted as an extra Enter).
+	 * be pasted as an extra Enter). Only do this if the buffer had no CR
+	 * to begin with, so CRLF that was already there (text copied from a
+	 * Windows program) comes back unchanged.
 	 */
-	if (buf != NULL) {
+	if (buf != NULL && !es->crlf) {
 		for (done = n = 0; n < (size_t)len; n++) {
 			if (buf[n] == '\r' && n + 1 < (size_t)len &&
 			    buf[n + 1] == '\n')
@@ -861,6 +866,9 @@ spawn_editor(struct client *c, const char *buf, size_t len,
 	es->path = xstrdup(path);
 	es->cb = cb;
 	es->arg = arg;
+#ifdef _WIN32
+	es->crlf = (len != 0 && memchr(buf, '\r', len) != NULL);
+#endif
 
 	sx = w->sx * 9 / 10;
 	sy = w->sy * 9 / 10;

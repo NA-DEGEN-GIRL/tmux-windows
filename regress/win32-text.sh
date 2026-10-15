@@ -427,3 +427,30 @@ $TMUX kill-server 2>/dev/null
 
 [ $FAIL -eq 0 ] && echo "All text tests passed"
 exit $FAIL
+# A buffer that already had CRLF (text from a Windows program) keeps it: only
+# line endings the editor added are changed.
+cat >"$OUT/ed2.sh" <<'EOF'
+printf 'a\r\nb\r\nc' >"$1"
+EOF
+printf '@"%s" "%%~dp0ed2.sh" %%1\r\n' "$BASH_W" >"$OUT/ed2.cmd"
+$INNER set -g editor "$OUTW\\ed2.cmd"
+# Leave only this buffer so choose-buffer selects it.
+for i in $($INNER list-buffers -F '#{buffer_name}' | tr -d '\r'); do
+	$INNER delete-buffer -b "$i"
+done
+$INNER set-buffer -b edcrlf "$(printf 'a\r\nb')"
+[ "$($INNER display -p -ts '#{pane_in_mode}' | tr -d '\r')" = 1 ] && \
+	$INNER send-keys -ts q
+$INNER choose-buffer -ts -F '#{buffer_name}'
+wait_for "$OUTER" o "(0) edcrlf" || fail "buffer editor CRLF setup"
+$INNER send-keys -c"$client" -ts e
+n=0
+while [ $n -lt 100 ]; do
+	b=$($INNER list-buffers -F '#{buffer_name} #{buffer_size}' | \
+	    tr -d '\r' | grep '^edcrlf ')
+	[ "$b" != "edcrlf 4" ] && break
+	sleep 0.1
+	n=$((n + 1))
+done
+check "buffer editor keeps CRLF already in the buffer" "edcrlf 7" "$b"
+
