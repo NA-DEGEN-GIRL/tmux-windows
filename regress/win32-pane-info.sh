@@ -6,7 +6,9 @@
 # processes attached to the pane's pseudoconsole. MSYS2 programs (Git Bash)
 # fork and exec through processes that exit, so the command a shell runs has
 # a parent that no longer exists; it must still be found. Programs that are
-# not shells keep the foreground while they run tools of their own.
+# not shells keep the foreground while they run tools of their own, and a
+# shell that reads input again has put the command it started in the
+# background.
 
 [ -z "$TEST_TMUX" ] && TEST_TMUX=$(readlink -f ../tmux)
 
@@ -77,6 +79,9 @@ BASH_W=$(cygpath -w /usr/bin/bash.exe)
 DIR="$OUT/dir with space 한글"
 mkdir -p "$DIR"
 DIR_W=$(cygpath -w "$DIR")
+DIR2="$OUT/background 작업"
+mkdir -p "$DIR2"
+DIR2_W=$(cygpath -w "$DIR2")
 
 $TMUX -fNUL new -d -s info -x 120 -y 30 -- "$BASH_W" -l </dev/null || exit 1
 $TMUX set -g remain-on-exit on
@@ -94,11 +99,47 @@ expect 15 info:0 '#{window_name}' bash "automatic-rename back to bash"
 $TMUX send-keys -t info:0 "cd '$DIR'" Enter
 expect 10 info:0 '#{pane_current_path}' "$DIR_W" "bash cwd after cd"
 
+# A background job is not the foreground once bash reads input again, so
+# the pane shows bash in its new directory (split-window -c
+# '#{pane_current_path}' depends on it). Until then a job started with &
+# cannot be told from a foreground one; wait for it to be seen.
+$TMUX send-keys -t info:0 'sleep 120 &' Enter
+wait_for 10 is info:0 '#{pane_current_command}' sleep
+sleep 0.5
+$TMUX send-keys -t info:0 "cd '$DIR2'" Enter
+expect 10 info:0 '#{pane_current_path}' "$DIR2_W" \
+    "bash cwd after cd with a background job"
+expect 5 info:0 '#{pane_current_command}' bash \
+    "bash at its prompt with a background job"
+expect 5 info:0 '#{window_name}' bash \
+    "automatic-rename ignores a background job"
+# A foreground command still wins, also after another job has exited (bash
+# handles SIGCHLD while it waits).
+$TMUX send-keys -t info:0 'sleep 2 & sleep 60' Enter
+expect 10 info:0 '#{pane_current_command}' sleep \
+    "foreground sleep with background jobs"
+sleep 3
+never_changes 3 info:0 '#{pane_current_command}' sleep \
+    "foreground sleep after a background job exited"
+$TMUX send-keys -t info:0 C-c
+expect 10 info:0 '#{pane_current_command}' bash "bash after foreground sleep"
+$TMUX send-keys -t info:0 'kill %1' Enter
+
 # --- cmd.exe ---
 $TMUX new-window -d -t info:1 -- cmd.exe /K
 expect 10 info:1 '#{pane_current_command}' cmd "cmd pane is cmd"
 $TMUX send-keys -t info:1 "cd /d \"$DIR_W\"" Enter
 expect 10 info:1 '#{pane_current_path}' "$DIR_W" "cmd cwd after cd"
+# start /b runs a command in the background.
+$TMUX send-keys -t info:1 \
+    'start /b "" "%SystemRoot%\System32\ping.exe" -n 120 127.0.0.1 >NUL' Enter
+wait_for 10 is info:1 '#{pane_current_command}' ping
+sleep 0.5
+$TMUX send-keys -t info:1 "cd /d \"$DIR2_W\"" Enter
+expect 10 info:1 '#{pane_current_path}' "$DIR2_W" \
+    "cmd cwd after cd with a background command"
+expect 5 info:1 '#{pane_current_command}' cmd \
+    "cmd at its prompt with a background command"
 # PATH is /bin:/usr/bin here, so name ping by its full path.
 $TMUX send-keys -t info:1 '"%SystemRoot%\System32\ping.exe" -n 60 127.0.0.1' \
     Enter

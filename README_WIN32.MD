@@ -151,6 +151,22 @@ it runs, and a program such as vim or an agent keeps the name while it runs
 tools of its own. One process snapshot is shared by all panes for 250 ms, and
 `automatic-rename` rechecks once a second.
 
+A command started in the background (`cmd &` in bash, `start /b` in cmd.exe)
+is recognised by the shell doing work again, such as reading a key at its
+prompt, after starting it; from then on the pane shows the shell and its
+directory. Limits of this approximation:
+
+- Until the shell reads input again, a background command is reported as
+  the foreground one (the shell has not changed directory since, so
+  `#{pane_current_path}` is still right).
+- A job brought back with `fg` stays treated as a background one.
+- PowerShell does its work on threads that cannot be told apart from idle
+  ones, so commands started with `Start-Process -NoNewWindow` are reported
+  as the foreground one while they run (PowerShell's `command &` jobs run
+  in a separate process outside the pane and are not affected).
+- A shell that reads a command's output itself, such as bash running
+  `$(command)`, may show as the shell while that command writes output.
+
 The path is the working directory of that process. PowerShell's
 `Set-Location` does not change the process working directory, so add this to
 the PowerShell profile (PowerShell 7.2+) for `#{pane_current_path}`, and
@@ -286,8 +302,9 @@ in a directory whose name is outside the ANSI code page.
 ### win32-pane-info.sh
 
 `#{pane_current_command}`, `automatic-rename` and `#{pane_current_path}` for
-Git Bash, cmd.exe and PowerShell panes, programs that run shells of their
-own (vim, node), and window names from Windows command lines.
+Git Bash, cmd.exe and PowerShell panes, background commands in Git Bash and
+cmd.exe, programs that run shells of their own (vim, node), and window names
+from Windows command lines.
 
 ### win32-install.sh
 

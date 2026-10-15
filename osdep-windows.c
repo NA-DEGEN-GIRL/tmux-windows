@@ -33,6 +33,32 @@
 /* Console host of a process not looked up yet. */
 #define OSDEP_HOST_UNKNOWN ((DWORD)-1)
 
+/*
+ * A shell that was busy more than this long (in milliseconds) after starting
+ * a command has put it in the background. Shells start waiting for a
+ * foreground command within a few milliseconds of starting it.
+ */
+#define OSDEP_JOB_SETTLE_MS 200
+
+/*
+ * Context switches of a shell's main thread between two looks that mean it
+ * did some work, such as reading a key at its prompt (bash takes seven or
+ * more for a key), rather than handling SIGCHLD for a background job while
+ * it waits for a foreground one (bash takes three).
+ */
+#define OSDEP_SHELL_SWITCHES 6
+
+/* Thread state of a waiting thread (KTHREAD_STATE Waiting). */
+#define OSDEP_THREAD_WAITING 5
+
+/*
+ * KUSER_SHARED_DATA, mapped at this address in every process: the tick count
+ * thread wait times are measured in, and its multiplier to milliseconds (as
+ * GetTickCount uses them).
+ */
+#define OSDEP_SHARED_TICK_MULTIPLIER (*(volatile ULONG *)0x7ffe0004)
+#define OSDEP_SHARED_TICK_COUNT (*(volatile ULONG *)0x7ffe0320)
+
 struct osdep_proc {
 	DWORD		 pid;
 	DWORD		 ppid;
@@ -41,11 +67,13 @@ struct osdep_proc {
 	u_int		 namelen;	/* in characters */
 	DWORD		 host;		/* console host pid or 0 */
 	int		 parent;	/* index of live parent or -1 */
+	const SYSTEM_PROCESS_INFORMATION *spi;
 
 	/* Per-query state. */
 	int		 member;	/* attached to the pane's console */
 	int		 lparent;	/* logical parent if member */
 	int		 eligible;	/* may be the foreground process */
+	int		 background;	/* in a shell's background job */
 };
 
 static struct {
@@ -55,8 +83,22 @@ static struct {
 	u_int			 nprocs;
 	u_int			*order;		/* indexes by creation time */
 	ULONGLONG		 when;
+	ULONGLONG		 now;		/* system time */
+	ULONG			 tick;		/* tick count */
+	u_int			 generation;
 	int			 valid;
 } osdep_snap;
+
+/* When a shell was last seen to do some work. */
+struct osdep_shell {
+	DWORD		 pid;
+	ULONGLONG	 created;
+	u_int		 generation;	/* of the snapshot last looked at */
+	ULONG		 switches;	/* of the main thread then */
+	ULONGLONG	 busy;		/* system time it last stopped work */
+};
+static struct osdep_shell	*osdep_shell_list;
+static u_int			 osdep_nshells;
 
 /* Processes that hand the terminal to their children like a Unix shell. */
 static const char *osdep_shells[] = {
@@ -132,6 +174,8 @@ osdep_snapshot(void)
 {
 	SYSTEM_PROCESS_INFORMATION	*spi;
 	struct osdep_proc		*p;
+	struct osdep_shell		*sh;
+	FILETIME			 ft;
 	ULONGLONG			 now = GetTickCount64();
 	ULONG				 need = 0, offset;
 	NTSTATUS			 status;
@@ -161,6 +205,11 @@ osdep_snapshot(void)
 		return (0);
 	}
 
+	GetSystemTimeAsFileTime(&ft);
+	osdep_snap.now = ((ULONGLONG)ft.dwHighDateTime << 32) |
+	    ft.dwLowDateTime;
+	osdep_snap.tick = OSDEP_SHARED_TICK_COUNT;
+
 	if (!ProcessIdToSessionId(GetCurrentProcessId(), &session))
 		session = (DWORD)-1;
 
@@ -185,6 +234,7 @@ osdep_snapshot(void)
 			p->name = spi->ImageName.Buffer;
 			p->namelen = spi->ImageName.Length / sizeof (wchar_t);
 			p->host = OSDEP_HOST_UNKNOWN;
+			p->spi = spi;
 		}
 		if (spi->NextEntryOffset == 0)
 			break;
@@ -214,6 +264,19 @@ osdep_snapshot(void)
 	}
 	qsort(osdep_snap.order, n, sizeof *osdep_snap.order, osdep_cmp_order);
 
+	/* Forget the shells that have exited. */
+	for (i = 0; i < osdep_nshells; /* nothing */) {
+		sh = &osdep_shell_list[i];
+		parent = osdep_find(sh->pid);
+		if (parent != -1 &&
+		    osdep_snap.procs[parent].created == sh->created) {
+			i++;
+			continue;
+		}
+		*sh = osdep_shell_list[--osdep_nshells];
+	}
+
+	osdep_snap.generation++;
 	osdep_snap.when = now;
 	osdep_snap.valid = 1;
 	return (1);
@@ -277,6 +340,86 @@ osdep_console_host(struct osdep_proc *p)
 }
 
 /*
+ * Look at the main thread (the oldest thread) of a shell, which reads its
+ * input and waits for its foreground commands. Returns the shell's state with
+ * the last time it stopped doing some work, judged from when its main thread
+ * last started to wait and how much it has run since the previous look.
+ */
+static struct osdep_shell *
+osdep_shell_look(struct osdep_proc *p)
+{
+	const SYSTEM_PROCESS_INFORMATION	*spi = p->spi;
+	const SYSTEM_THREAD_INFORMATION		*t, *main = NULL;
+	struct osdep_shell			*sh = NULL;
+	ULONGLONG				 idle, stopped;
+	ULONG					 i;
+
+	for (i = 0; i < osdep_nshells; i++) {
+		if (osdep_shell_list[i].pid == p->pid &&
+		    osdep_shell_list[i].created == p->created) {
+			sh = &osdep_shell_list[i];
+			if (sh->generation == osdep_snap.generation)
+				return (sh);
+			break;
+		}
+	}
+
+	t = (const SYSTEM_THREAD_INFORMATION *)(spi + 1);
+	for (i = 0; i < spi->NumberOfThreads; i++) {
+		/* Reserved1[2] is CreateTime. */
+		if (main == NULL ||
+		    t[i].Reserved1[2].QuadPart < main->Reserved1[2].QuadPart)
+			main = &t[i];
+	}
+	if (main == NULL)
+		return (NULL);
+
+	/*
+	 * Reserved2 is WaitTime, the tick count when the thread started to
+	 * wait, and Reserved3 ContextSwitches.
+	 */
+	if (main->ThreadState != OSDEP_THREAD_WAITING)
+		stopped = osdep_snap.now;
+	else {
+		idle = ((ULONGLONG)(osdep_snap.tick - main->Reserved2) *
+		    OSDEP_SHARED_TICK_MULTIPLIER) >> 24;
+		stopped = osdep_snap.now - idle * 10000;
+	}
+
+	if (sh == NULL) {
+		osdep_shell_list = xreallocarray(osdep_shell_list,
+		    osdep_nshells + 1, sizeof *osdep_shell_list);
+		sh = &osdep_shell_list[osdep_nshells++];
+		sh->pid = p->pid;
+		sh->created = p->created;
+		sh->busy = stopped;
+	} else if (main->Reserved3 - sh->switches >= OSDEP_SHELL_SWITCHES &&
+	    stopped > sh->busy)
+		sh->busy = stopped;
+	sh->switches = main->Reserved3;
+	sh->generation = osdep_snap.generation;
+	return (sh);
+}
+
+/*
+ * Has a shell put a command it started in the background? Windows has no
+ * process groups to say, so watch the shell: while it waits for a foreground
+ * command it does nothing, but at its prompt it reads every key. So a command
+ * is in the background once the shell has done some work after starting it.
+ * A command started with & is taken to be in the foreground until the shell
+ * reads a key.
+ */
+static int
+osdep_is_background(struct osdep_proc *shell, struct osdep_proc *p)
+{
+	struct osdep_shell	*sh;
+
+	if ((sh = osdep_shell_look(shell)) == NULL)
+		return (0);
+	return (sh->busy > p->created + OSDEP_JOB_SETTLE_MS * 10000ULL);
+}
+
+/*
  * Approximate the foreground process of a pane, which Unix gets from the
  * terminal's foreground process group.
  *
@@ -288,10 +431,12 @@ osdep_console_host(struct osdep_proc *p)
  * came from as far as can be told.
  *
  * Like a shell giving the terminal to a job, only shells pass the foreground
- * on: a process is eligible if all its ancestors are shells, and the newest
- * eligible member wins. So a pane running vim shows vim even while it runs
- * a filter, and one running an agent shows the agent rather than the tools
- * it starts.
+ * on: a process is eligible if all its ancestors are shells and it is not in
+ * a background job, and the newest eligible member wins. So a pane running
+ * vim shows vim even while it runs a filter, one running an agent shows the
+ * agent rather than the tools it starts, and a shell at its prompt shows the
+ * shell even with jobs running in the background. A background command that
+ * is not a shell adopts no orphans: it forks nothing that would outlive it.
  *
  * Fills chain with the foreground process followed by its ancestors, the
  * pane process last, and returns its length.
@@ -316,7 +461,15 @@ osdep_foreground(DWORD root_pid, int *chain, u_int size)
 	root->member = 1;
 	root->lparent = -1;
 	root->eligible = 1;
+	root->background = 0;
 	best = last = r;
+
+	/*
+	 * Look at the shells on each query, so their work is noticed close to
+	 * when it happened.
+	 */
+	if (osdep_is_shell(root))
+		osdep_shell_look(root);
 
 	for (i = 0; i < osdep_snap.nprocs; i++) {
 		idx = osdep_snap.order[i];
@@ -340,10 +493,21 @@ osdep_foreground(DWORD root_pid, int *chain, u_int size)
 		p->member = 1;
 		p->lparent = p->parent != -1 ? p->parent : last;
 		parent = &osdep_snap.procs[p->lparent];
-		p->eligible = parent->eligible && osdep_is_shell(parent);
-		if (p->eligible)
+		p->background = parent->background;
+		p->eligible = 0;
+		if (parent->eligible && osdep_is_shell(parent)) {
+			if (osdep_is_background(parent, p))
+				p->background = 1;
+			else
+				p->eligible = 1;
+		}
+		if (p->eligible) {
 			best = idx;
-		last = idx;
+			if (osdep_is_shell(p))
+				osdep_shell_look(p);
+		}
+		if (!p->background || osdep_is_shell(p))
+			last = idx;
 	}
 
 	n = 0;
