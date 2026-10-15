@@ -293,11 +293,13 @@ A control client (`-C`) with piped stdin must run a command or fail promptly,
 never hang; then the upstream control-client pane operations (splitw,
 selectp, killp, swapp, selectl tiled, killw) with their effects checked.
 
-### win32-unicode.sh (7 tests)
+### win32-unicode.sh (8 tests)
 
 Korean option values, session and window names, `send-keys -l` (including
-characters outside the BMP), `-e` values, `-c` directories and a `tmux.exe`
-in a directory whose name is outside the ANSI code page.
+characters outside the BMP), `-e` values, `-c` directories, a `tmux.exe`
+in a directory whose name is outside the ANSI code page, and (with `mt.exe`
+from the Windows SDK) arguments to a copy of `tmux.exe` whose manifest has
+no UTF-8 code page, as on Windows 10 1809.
 
 ### win32-pane-info.sh
 

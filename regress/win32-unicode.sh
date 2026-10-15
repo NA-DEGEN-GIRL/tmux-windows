@@ -7,8 +7,21 @@
 # Korean system), so Korean session names, option values, -c paths and -e
 # values were corrupted, and a tmux.exe in a directory whose name is outside
 # the ANSI code page could not start its server.
+#
+# Windows 10 before 1903 ignores the manifest's code page; tmux then rebuilds
+# argv from the UTF-16 command line. Test 7 checks that with a copy of
+# tmux.exe whose manifest has no code page (needs mt.exe from the Windows
+# SDK).
 
 [ -z "$TEST_TMUX" ] && TEST_TMUX=$(readlink -f ../tmux)
+
+# mt.exe from the Windows SDK, found before PATH is reset (optional).
+MT=$(command -v mt.exe 2>/dev/null)
+if [ -z "$MT" ]; then
+	for i in "/c/Program Files (x86)/Windows Kits/10/bin/"*/x64/mt.exe; do
+		[ -x "$i" ] && MT=$i
+	done
+fi
 
 # A native Python, found before PATH is reset (optional).
 PYTHON=
@@ -28,7 +41,7 @@ $TMUX kill-server 2>/dev/null
 
 OUT=$(mktemp -d)
 COPY="$OUT/tmux 한글 café😀"
-trap '$TMUX kill-server 2>/dev/null; "$COPY/tmux.exe" -L$LABEL-copy kill-server 2>/dev/null; rm -rf "$OUT"' 0 1 15
+trap '$TMUX kill-server 2>/dev/null; "$COPY/tmux.exe" -L$LABEL-copy kill-server 2>/dev/null; "$OUT/acp/tmux.exe" -L$LABEL-acp kill-server 2>/dev/null; rm -rf "$OUT"' 0 1 15
 
 FAIL=0
 fail() {
@@ -183,6 +196,41 @@ else
 	fail "server started from a Unicode directory"
 fi
 "$COPY/tmux.exe" -L$LABEL-copy kill-server 2>/dev/null
+
+# --- Test 7: arguments without the manifest's UTF-8 code page ---
+# As on Windows 10 1809: argv must still arrive as UTF-8 (the ANSI code page
+# cannot hold these names on most systems, and loses bytes even when it
+# can). Paths must then be in the ANSI code page, so the copy lives in $OUT.
+if [ -n "$MT" ]; then
+	mkdir -p "$OUT/acp"
+	cp "$TEST_TMUX" "$OUT/acp/tmux.exe" 2>/dev/null ||
+	    cp "$TEST_TMUX.exe" "$OUT/acp/tmux.exe"
+	ACP_W=$(cygpath -w "$OUT/acp")
+	MSYS_NO_PATHCONV=1 "$MT" -nologo \
+	    "-inputresource:$ACP_W\\tmux.exe;#1" "-out:$ACP_W\\m.xml" \
+	    >/dev/null 2>&1
+	sed 's#<activeCodePage[^>]*>[^<]*</activeCodePage>##' \
+	    "$OUT/acp/m.xml" >"$OUT/acp/n.xml" 2>/dev/null
+	if [ -s "$OUT/acp/n.xml" ] && MSYS_NO_PATHCONV=1 "$MT" -nologo \
+	    -manifest "$ACP_W\\n.xml" "-outputresource:$ACP_W\\tmux.exe;#1" \
+	    >/dev/null 2>&1; then
+		ACP="$OUT/acp/tmux.exe -L$LABEL-acp"
+		$ACP -fNUL new -d -s "$SNAME" -x 80 -y 24 </dev/null
+		$ACP set -g @k "$KOREAN"
+		N=$($ACP display -p '#{n:@k}' | tr -d '\r')
+		GOT=$($ACP ls -F '#{session_name}' | tr -d '\r')
+		if [ "$N" = 15 ] && [ "$GOT" = "$SNAME" ]; then
+			echo "PASS 7: arguments without the UTF-8 code page"
+		else
+			fail "arguments without the UTF-8 code page: length $N, session $(hex "$GOT")"
+		fi
+		$ACP kill-server 2>/dev/null
+	else
+		fail "could not remove the code page from the manifest"
+	fi
+else
+	echo "SKIP 7: mt.exe not found"
+fi
 
 $TMUX kill-server 2>/dev/null
 
