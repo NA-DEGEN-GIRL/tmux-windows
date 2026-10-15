@@ -100,6 +100,18 @@ struct osdep_shell {
 static struct osdep_shell	*osdep_shell_list;
 static u_int			 osdep_nshells;
 
+/*
+ * Console hosts already looked up, kept between snapshots: finding one means
+ * opening the process, and the same processes are asked about every time.
+ */
+struct osdep_host {
+	DWORD		 pid;
+	ULONGLONG	 created;
+	DWORD		 host;
+};
+static struct osdep_host	*osdep_host_list;
+static u_int			 osdep_nhosts;
+
 /* Processes that hand the terminal to their children like a Unix shell. */
 static const char *osdep_shells[] = {
 	"ash", "bash", "cmd", "csh", "dash", "elvish", "fish", "ksh", "mksh",
@@ -175,6 +187,7 @@ osdep_snapshot(void)
 	SYSTEM_PROCESS_INFORMATION	*spi;
 	struct osdep_proc		*p;
 	struct osdep_shell		*sh;
+	struct osdep_host		*oh;
 	FILETIME			 ft;
 	ULONGLONG			 now = GetTickCount64();
 	ULONG				 need = 0, offset;
@@ -276,6 +289,19 @@ osdep_snapshot(void)
 		*sh = osdep_shell_list[--osdep_nshells];
 	}
 
+	/* Reuse the console hosts of processes still running. */
+	for (i = 0; i < osdep_nhosts; /* nothing */) {
+		oh = &osdep_host_list[i];
+		parent = osdep_find(oh->pid);
+		if (parent != -1 &&
+		    osdep_snap.procs[parent].created == oh->created) {
+			osdep_snap.procs[parent].host = oh->host;
+			i++;
+			continue;
+		}
+		*oh = osdep_host_list[--osdep_nhosts];
+	}
+
 	osdep_snap.generation++;
 	osdep_snap.when = now;
 	osdep_snap.valid = 1;
@@ -330,12 +356,19 @@ osdep_console_host(struct osdep_proc *p)
 	p->host = 0;
 
 	h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, p->pid);
-	if (h == NULL)
-		return (0);
-	if (NT_SUCCESS(NtQueryInformationProcess(h, OSDEP_CONSOLE_HOST_CLASS,
-	    &value, sizeof value, NULL)))
-		p->host = (DWORD)(value & ~(ULONG_PTR)3);
-	CloseHandle(h);
+	if (h != NULL) {
+		if (NT_SUCCESS(NtQueryInformationProcess(h,
+		    OSDEP_CONSOLE_HOST_CLASS, &value, sizeof value, NULL)))
+			p->host = (DWORD)(value & ~(ULONG_PTR)3);
+		CloseHandle(h);
+	}
+
+	osdep_host_list = xreallocarray(osdep_host_list, osdep_nhosts + 1,
+	    sizeof *osdep_host_list);
+	osdep_host_list[osdep_nhosts].pid = p->pid;
+	osdep_host_list[osdep_nhosts].created = p->created;
+	osdep_host_list[osdep_nhosts].host = p->host;
+	osdep_nhosts++;
 	return (p->host);
 }
 

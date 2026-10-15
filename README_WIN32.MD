@@ -149,7 +149,7 @@ started by a shell (cmd, PowerShell, bash, ...) is taken as the foreground
 one, so `sleep` run from Git Bash or `ping` run from cmd.exe is reported while
 it runs, and a program such as vim or an agent keeps the name while it runs
 tools of its own. One process snapshot is shared by all panes for 250 ms, and
-`automatic-rename` rechecks once a second.
+`automatic-rename` rechecks all windows together once a second.
 
 A command started in the background (`cmd &` in bash, `start /b` in cmd.exe)
 is recognised by the shell doing work again, such as reading a key at its

@@ -36,10 +36,39 @@ static char	*format_window_name(struct window *);
 /*
  * A Windows pane gives no sign when its foreground process changes without
  * output: MSYS2 bash forks and execs a command well after echoing it, so the
- * check made for the echo may still see bash. While automatic-rename is on,
- * check again this many seconds after each check.
+ * check made for the echo may still see bash. While any window has
+ * automatic-rename on, check all of them again every this many seconds. One
+ * timer for every window means one look at the process table per interval,
+ * and leaves each window's own timer free for the usual rate limit.
  */
 #define NAME_RECHECK_INTERVAL 1
+
+static struct event	name_recheck_event;
+
+static void
+name_recheck_callback(__unused evutil_socket_t fd, __unused short events,
+    __unused void *arg)
+{
+	struct window	*w;
+
+	/* The event loop will call check_window_name for us on the way out. */
+	RB_FOREACH(w, windows, &windows) {
+		if (w->active != NULL &&
+		    options_get_number(w->options, "automatic-rename"))
+			w->active->flags |= PANE_CHANGED;
+	}
+}
+
+static void
+name_recheck_queue(void)
+{
+	struct timeval	tv = { NAME_RECHECK_INTERVAL, 0 };
+
+	if (!event_initialized(&name_recheck_event))
+		evtimer_set(&name_recheck_event, name_recheck_callback, NULL);
+	if (!evtimer_pending(&name_recheck_event, NULL))
+		evtimer_add(&name_recheck_event, &tv);
+}
 #endif
 
 static void
@@ -50,10 +79,6 @@ name_time_callback(__unused evutil_socket_t fd, __unused short events,
 
 	/* The event loop will call check_window_name for us on the way out. */
 	log_debug("@%u name timer expired", w->id);
-#ifdef _WIN32
-	if (w->active != NULL)
-		w->active->flags |= PANE_CHANGED;
-#endif
 }
 
 static int
@@ -79,6 +104,9 @@ check_window_name(struct window *w)
 
 	if (!options_get_number(w->options, "automatic-rename"))
 		return;
+#ifdef _WIN32
+	name_recheck_queue();
+#endif
 
 	if (~w->active->flags & PANE_CHANGED) {
 		log_debug("@%u active pane not changed", w->id);
@@ -119,14 +147,6 @@ check_window_name(struct window *w)
 		log_debug("@%u name not changed (still %s)", w->id, w->name);
 
 	free(name);
-
-#ifdef _WIN32
-	if (!event_initialized(&w->name_event))
-		evtimer_set(&w->name_event, name_time_callback, w);
-	timerclear(&next);
-	next.tv_sec = NAME_RECHECK_INTERVAL;
-	event_add(&w->name_event, &next);
-#endif
 }
 
 char *
