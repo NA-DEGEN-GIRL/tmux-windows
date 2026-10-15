@@ -411,7 +411,6 @@ if(BUILD_TESTING)
         win32/tre-mem.c
     )
     target_sources(win32-tparm-test PRIVATE ${TMUX_WIN32_TEXT_SOURCES})
-    target_link_libraries(win32-tparm-test PRIVATE shell32)
 
     add_executable(win32-text-unit-test
         regress/win32-text-unit.c
@@ -432,7 +431,6 @@ if(BUILD_TESTING)
         ws2_32
         advapi32
         kernel32
-        shell32
     )
     set_property(TARGET win32-text-unit-test PROPERTY C_STANDARD 11)
     add_test(NAME win32-text-unit COMMAND win32-text-unit-test)

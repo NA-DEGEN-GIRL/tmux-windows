@@ -293,6 +293,28 @@ else
 fi
 $TMUX kill-window -tab:sk
 
+# --- command line arguments ---
+# Arguments are split like the C runtime does, so doubled quotes inside a
+# quoted argument (cmd.exe and batch files) stay in the argument.
+CMD=$(cygpath -u "${COMSPEC:-C:\\Windows\\System32\\cmd.exe}")
+printf '@"%s" -L%s display -p -tab "x ""q"" y"\r\n' \
+	"$(cygpath -w "$TEST_TMUX")" "$LABEL" >"$OUT/dq.cmd"
+check "doubled quotes from cmd.exe" 'x "q" y' \
+	"$("$CMD" //c "$(cygpath -w "$OUT/dq.cmd")" 2>&1 | tr -d '\r')"
+# A server started with -S in a directory with a Hangul name must listen
+# where the client looks.
+mkdir -p "$OUT/한글"
+SOCK="$(cygpath -w "$OUT/한글")\\sock"
+if timeout 20 $TEST_TMUX -S "$SOCK" $FNULL new -d -sk </dev/null; then
+	check "-S in a Hangul directory" "k" \
+	    "$(timeout 10 $TEST_TMUX -S "$SOCK" display -p '#{session_name}' | tr -d '\r')"
+	timeout 10 $TEST_TMUX -S "$SOCK" kill-server
+else
+	fail "-S in a Hangul directory: no server"
+	# Stop the server that is listening on the wrong path.
+	PATH=$ORIG_PATH powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='tmux.exe'\" | Where-Object { \$_.CommandLine -like '*$(basename "$OUT")*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }"
+fi
+
 # --- nested client: terminal features, mouse, cursor, clipboard ---
 $INNER $FNULL new -d -ss -x100 -y30 </dev/null || exit 1
 $INNER set -g status off

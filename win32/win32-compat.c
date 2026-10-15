@@ -24,7 +24,7 @@
 
 #include "win32-platform.h"
 
-#include <shellapi.h>
+#include <corecrt_startup.h>
 
 /*
  * MSVC CRT provides _environ; POSIX code expects environ.
@@ -1458,20 +1458,27 @@ win32_crt_init(void (*logfn)(const char *, ...))
  * it (such as emoji) and gives tmux non-UTF-8 bytes for the rest (such as
  * Korean in CP949), so send-keys, session names, paths and formats given
  * on the command line would be corrupted.
+ *
+ * Have the CRT split the wide command line itself so the arguments are
+ * the same as the ones it gave main(): CommandLineToArgvW() has different
+ * rules for doubled quotes ("") as used in cmd.exe and batch files.
  */
 void
 win32_utf8_args(int *argc, char ***argv)
 {
-	LPWSTR	 *wargv;
+	wchar_t	**wargv;
 	char	**nargv;
 	int	  wargc, i, n;
 
-	wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
-	if (wargv == NULL)
+	if (_configure_wide_argv(_crt_argv_unexpanded_arguments) != 0)
+		return;
+	wargv = __wargv;
+	wargc = __argc;
+	if (wargv == NULL || wargc != *argc)
 		return;
 	nargv = calloc((size_t)wargc + 1, sizeof *nargv);
 	if (nargv == NULL)
-		goto fail;
+		return;
 	for (i = 0; i < wargc; i++) {
 		n = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, NULL, 0,
 		    NULL, NULL);
@@ -1481,18 +1488,14 @@ win32_utf8_args(int *argc, char ***argv)
 		    NULL, NULL) != n)
 			goto fail;
 	}
-	LocalFree(wargv);
 	*argc = wargc;
 	*argv = nargv;
 	return;
 
 fail:
-	if (nargv != NULL) {
-		for (i = 0; i < wargc; i++)
-			free(nargv[i]);
-		free(nargv);
-	}
-	LocalFree(wargv);
+	for (i = 0; i < wargc; i++)
+		free(nargv[i]);
+	free(nargv);
 }
 
 /*
