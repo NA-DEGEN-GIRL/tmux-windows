@@ -732,9 +732,9 @@ spawn_editor_finish(struct window_pane *wp)
 
 #ifdef _WIN32
 	/*
-	 * Read in binary mode: text mode turns CRLF into LF (so fewer bytes
-	 * than the file size arrive and the edit was thrown away) and stops
-	 * at a 0x1a byte.
+	 * Read in binary mode and in a loop: text mode turns CRLF into LF (so
+	 * fewer bytes than the file size arrive and the single fread() threw
+	 * the edit away) and stops at a 0x1a byte.
 	 */
 	f = fopen(es->path, "rb");
 	if (f != NULL) {
@@ -760,6 +760,21 @@ spawn_editor_finish(struct window_pane *wp)
 				len = 0;
 		}
 		fclose(f);
+	}
+
+	/*
+	 * Windows editors usually save with CRLF line endings: turn them back
+	 * into LF so the buffer does not gain a CR on every line (which would
+	 * be pasted as an extra Enter).
+	 */
+	if (buf != NULL) {
+		for (done = n = 0; n < (size_t)len; n++) {
+			if (buf[n] == '\r' && n + 1 < (size_t)len &&
+			    buf[n + 1] == '\n')
+				continue;
+			buf[done++] = buf[n];
+		}
+		len = done;
 	}
 #else
 	f = fopen(es->path, "r");
