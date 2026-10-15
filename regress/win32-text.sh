@@ -316,14 +316,64 @@ else
 fi
 
 # --- nested client: terminal features, mouse, cursor, clipboard ---
-$INNER $FNULL new -d -ss -x100 -y30 </dev/null || exit 1
+# Set the shell first so the first pane runs Git Bash whatever SHELL is.
+$INNER $FNULL set -g default-shell "$BASH_W" \; new -d -ss -x100 -y30 \
+	</dev/null || exit 1
 $INNER set -g status off
-$INNER set -g default-shell "$BASH_W"
 $INNER set -s set-clipboard on
 $INNER set -as terminal-features 'xterm*:sync'
 $OUTER $FNULL new -d -so -x120 -y40 </dev/null || exit 1
 $OUTER set -s set-clipboard on
 wait_for "$OUTER" o '\$' || sleep 2
+
+# attach_features $env: attach an inner client from the outer pane with the
+# given environment, print its terminal features and detach it again.
+attach_features() {
+	$OUTER send-keys -to "env -u TMUX -u WT_SESSION -u TERM_PROGRAM $1 '$TEST_TMUX' -L$LABEL-inner attach -ts" Enter
+	n=0
+	while [ $n -lt 100 ]; do
+		[ -n "$($INNER list-clients 2>/dev/null)" ] && break
+		sleep 0.1
+		n=$((n + 1))
+	done
+	# Give the terminal time to answer the DA and XTVERSION queries.
+	sleep 1
+	$INNER list-clients -F '#{client_termfeatures}' | tr -d '\r'
+	$INNER detach-client -s s
+	n=0
+	while [ $n -lt 100 ]; do
+		[ -z "$($INNER list-clients 2>/dev/null)" ] && break
+		sleep 0.1
+		n=$((n + 1))
+	done
+	sleep 1
+}
+
+# has_feature $name $features $feature $expected(1 or 0)
+has_feature() {
+	case ",$2," in
+	*,$3,*) got=1;;
+	*) got=0;;
+	esac
+	check "$1 feature $3" "$4" "$got"
+}
+
+# Windows Terminal (WT_SESSION) and TERM_PROGRAM select default features.
+# Use a TERM that does not match the xterm* defaults; the outer tmux answers
+# XTVERSION as tmux, which gives neither sync nor osc7.
+features=$(attach_features "TERM=wfc-test")
+for f in sync osc7; do
+	has_feature "plain terminal" "$features" $f 0
+done
+features=$(attach_features "TERM=wfc-test WT_SESSION=wfc")
+for f in clipboard ccolour cstyle focus hyperlinks sync title usstyle; do
+	has_feature "Windows Terminal" "$features" $f 1
+done
+features=$(attach_features "TERM=wfc-test TERM_PROGRAM=iTerm2")
+for f in osc7 sync; do
+	has_feature "TERM_PROGRAM=iTerm2" "$features" $f 1
+done
+
 $OUTER send-keys -to "env -u TMUX -u WT_SESSION -u TERM_PROGRAM TERM=xterm-256color '$TEST_TMUX' -L$LABEL-inner attach -ts" Enter
 n=0
 while [ $n -lt 100 ]; do
@@ -352,6 +402,24 @@ while [ $n -lt 50 ]; do
 done
 check "mouse on enables SGR mouse reporting" "11" "$m"
 $INNER set -g mouse off
+
+# Extended (CSI u) keys from the terminal with code points outside the BMP.
+$INNER bind -n "C-$(printf '\360\237\230\200')" set -g @gotkey ctrl-emoji
+$INNER bind -n "M-$(printf '\355\225\234')" set -g @gotkey2 meta-hangul
+$OUTER send-keys -to -l "$(printf '\033[128512;5u')"
+$OUTER send-keys -to -l "$(printf '\033[54620;3u')"
+n=0
+while [ $n -lt 50 ]; do
+	k=$($INNER show -gv @gotkey 2>/dev/null | tr -d '\r')
+	[ -n "$k" ] && break
+	sleep 0.1
+	n=$((n + 1))
+done
+check "CSI u key C-emoji" "ctrl-emoji" "$k"
+check "CSI u key M-Hangul" "meta-hangul" \
+	"$($INNER show -gv @gotkey2 2>/dev/null | tr -d '\r')"
+$INNER unbind -n "C-$(printf '\360\237\230\200')"
+$INNER unbind -n "M-$(printf '\355\225\234')"
 
 $INNER send-keys -ts "printf '\\033[6 q\\033]12;#ff0000\\007'; sleep 60" Enter
 n=0
@@ -420,13 +488,6 @@ check "buffer editor content" "one two three" \
 	"$($INNER show-buffer -b edbuf | tr -d '\r' | tr '\n' ' ')"
 $INNER has-session -ts 2>/dev/null || fail "inner server died in buffer editor"
 
-$OUTER kill-server 2>/dev/null
-$INNER kill-server 2>/dev/null
-alive "all tests"
-$TMUX kill-server 2>/dev/null
-
-[ $FAIL -eq 0 ] && echo "All text tests passed"
-exit $FAIL
 # A buffer that already had CRLF (text from a Windows program) keeps it: only
 # line endings the editor added are changed.
 cat >"$OUT/ed2.sh" <<'EOF'
@@ -454,3 +515,10 @@ while [ $n -lt 100 ]; do
 done
 check "buffer editor keeps CRLF already in the buffer" "edcrlf 7" "$b"
 
+$OUTER kill-server 2>/dev/null
+$INNER kill-server 2>/dev/null
+alive "all tests"
+$TMUX kill-server 2>/dev/null
+
+[ $FAIL -eq 0 ] && echo "All text tests passed"
+exit $FAIL
