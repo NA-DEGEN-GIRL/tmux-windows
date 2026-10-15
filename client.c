@@ -54,6 +54,7 @@ static char		 client_tty_token[65];
 static struct event	 client_tty_event;
 static HANDLE		 client_tty_out = INVALID_HANDLE_VALUE;
 static HANDLE		 client_stdin_thread_h = NULL;
+static HANDLE		 client_stdin_stop;
 static volatile int	 client_tty_running = 0;
 static int		 client_tty_relaying;
 static int		 client_tty_raw;
@@ -971,6 +972,60 @@ client_tty_send(SOCKET s, const char *buf, size_t len)
 }
 
 /*
+ * Wait until there is console input that ReadFile will return at once, or
+ * until the thread is told to stop. Records that give no input (key releases,
+ * lone modifiers, focus, menu and size events) are dropped first so that a
+ * raw console read never blocks: a blocked console read cannot reliably be
+ * cancelled and would take input meant for whatever uses the console next,
+ * such as lock-command. Returns 0 if there is input, -1 to stop.
+ */
+static int
+client_console_wait(HANDLE h)
+{
+	INPUT_RECORD		 ir[64];
+	HANDLE			 handles[2];
+	KEY_EVENT_RECORD	*ke;
+	DWORD			 n, i, dropped;
+
+	handles[0] = client_stdin_stop;
+	handles[1] = h;
+	for (;;) {
+		if (WaitForMultipleObjects(2, handles, FALSE, INFINITE) !=
+		    WAIT_OBJECT_0 + 1)
+			return (-1);
+		if (!PeekConsoleInputW(h, ir, nitems(ir), &n))
+			return (-1);
+		for (i = 0; i < n; i++) {
+			if (ir[i].EventType != KEY_EVENT)
+				continue;
+			ke = &ir[i].Event.KeyEvent;
+			if (!ke->bKeyDown)
+				continue;
+			if (ke->uChar.UnicodeChar != 0)
+				break;
+			switch (ke->wVirtualKeyCode) {
+			case VK_SHIFT:
+			case VK_CONTROL:
+			case VK_MENU:
+			case VK_CAPITAL:
+			case VK_NUMLOCK:
+			case VK_SCROLL:
+			case VK_LWIN:
+			case VK_RWIN:
+				continue;
+			}
+			break;
+		}
+		if (i != 0 && !ReadConsoleInputW(h, ir, i, &dropped))
+			return (-1);
+		if (i < n)
+			return (0);
+		if (n == 0)
+			Sleep(10);
+	}
+}
+
+/*
  * Tty relay: read from console stdin (or, in control mode, any stdin) and
  * send it to the server. Runs in a separate thread since reads block.
  */
@@ -987,6 +1042,8 @@ client_stdin_thread_func(LPVOID arg)
 	control = (client_flags & CLIENT_CONTROL) != 0;
 
 	while (client_tty_running) {
+		if (console && client_console_wait(h) != 0)
+			break;
 		if (!ReadFile(h, buf, sizeof buf, &nread, NULL)) {
 			error = GetLastError();
 			if (error == ERROR_OPERATION_ABORTED &&
@@ -996,8 +1053,6 @@ client_stdin_thread_func(LPVOID arg)
 			    error == ERROR_HANDLE_EOF);
 			break;
 		}
-		if (!client_tty_running)
-			break;
 		if (nread == 0) {
 			if (console && !control)
 				continue;
@@ -1031,6 +1086,10 @@ client_start_stdin_thread(void)
 {
 	if (client_tty_fd == -1 || client_stdin_thread_h != NULL)
 		return;
+	if (client_stdin_stop == NULL)
+		client_stdin_stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+	else
+		ResetEvent(client_stdin_stop);
 	client_tty_running = 1;
 	client_stdin_thread_h = CreateThread(NULL, 0, client_stdin_thread_func,
 	    (LPVOID)(intptr_t)client_tty_fd, 0, NULL);
@@ -1045,6 +1104,8 @@ client_stop_stdin_thread(void)
 	if (client_stdin_thread_h == NULL)
 		return;
 	client_tty_running = 0;
+	if (client_stdin_stop != NULL)
+		SetEvent(client_stdin_stop);
 	for (i = 0; i < 20; i++) {
 		CancelSynchronousIo(client_stdin_thread_h);
 		if (WaitForSingleObject(client_stdin_thread_h, 50) ==
