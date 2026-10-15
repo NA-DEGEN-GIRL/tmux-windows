@@ -255,7 +255,12 @@ cmd_run_shell_callback(struct job *job)
 	int				 retcode, status;
 
 	do {
+#ifdef _WIN32
+		/* Windows programs end lines with CRLF. */
+		line = evbuffer_readln(event->input, NULL, EVBUFFER_EOL_CRLF);
+#else
 		line = evbuffer_readln(event->input, NULL, EVBUFFER_EOL_LF);
+#endif
 		if (line != NULL) {
 			cmd_run_shell_print(job, line);
 			free(line);

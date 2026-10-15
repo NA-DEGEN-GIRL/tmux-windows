@@ -77,10 +77,16 @@ wait_file() {
 
 start_server "$CMD_EXE"
 
-# 1. run-shell: output and exit status.
-R=$($TMUX run-shell 'echo run-ok' | tr -d '\r')
-[ "$R" = "run-ok" ] && pass "run-shell output" ||
-	fail "run-shell output: '$R'"
+# 1. run-shell: output and exit status. Windows programs end lines with
+# CRLF, which must not be left in the lines; the client may print its own
+# line ends as CRLF, so remove one CR at the end of each line only.
+R=$($TMUX run-shell 'echo run-ok& echo line-2' | od -An -c | tr -s ' \n' ' ')
+case "$R" in
+" r u n - o k \n l i n e - 2 \n "|" r u n - o k \r \n l i n e - 2 \r \n ")
+	pass "run-shell output";;
+*)
+	fail "run-shell output: '$R'";;
+esac
 $TMUX run-shell 'exit 3' >$OUT/rs 2>&1
 RC=$?
 if [ $RC -eq 3 ] && grep -q "returned 3" $OUT/rs; then
