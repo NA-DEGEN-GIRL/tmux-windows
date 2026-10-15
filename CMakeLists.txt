@@ -240,6 +240,7 @@ set(TMUX_WIN32_SOURCES
     win32/win32-process.c
     win32/win32-pty.c
     win32/win32-signal.c
+    win32/win32-spawn.c
     win32/win32-terminfo.c
     win32/win32-tty.c
     win32/win32-regex.c

@@ -424,6 +424,10 @@ popup_make_pane(struct popup_data *pd, enum layout_type type)
 	layout_assign_pane(lc, new_wp, 0);
 
 	if (pd->job != NULL) {
+#ifdef _WIN32
+		/* The pane takes over the pseudo console with the fd. */
+		new_wp->win32_pty = job_get_pty(pd->job);
+#endif
 		new_wp->fd = job_transfer(pd->job, &new_wp->pid, new_wp->tty,
 		    sizeof new_wp->tty);
 		pd->job = NULL;

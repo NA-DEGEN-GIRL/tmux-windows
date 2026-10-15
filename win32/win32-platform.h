@@ -889,21 +889,7 @@ static inline void win32_wsa_init(void) {
  * Forward declarations for win32 module functions.
  */
 
-/* win32-pty.c */
-struct win32_pty;
-struct win32_pty *win32_pty_spawn(const char *cmd, const char *cwd,
-    char *env, int cols, int rows, pid_t *pid);
-int  win32_pty_resize(struct win32_pty *pty, int cols, int rows);
-void win32_pty_close(struct win32_pty *pty);
-int  win32_pty_get_fd(struct win32_pty *pty);
-HANDLE win32_pty_get_process(struct win32_pty *pty);
-
 /* win32-process.c */
-void  win32_process_watch(HANDLE hProcess, pid_t pid);
-void  win32_process_unwatch(pid_t pid);
-void  win32_process_init(void);
-void  win32_process_cleanup(void);
-pid_t win32_process_spawn(const char *cmd, const char *cwd, int outfd);
 void  win32_launch_server(const char *label);
 
 /* win32-ipc.c */
@@ -1096,5 +1082,76 @@ static inline int getpagesize(void) {
 #define TMUX_VERSION PACKAGE_VERSION
 #endif
 #endif
+
+/*
+ * Batch A: processes, jobs and ConPTY (win32-spawn.c, win32-process.c,
+ * win32-pty.c).
+ */
+struct environ;
+struct job;
+
+/* What to run and where; the last four fields are win32_spawn_prepare's. */
+struct win32_spawn {
+	const char	 *shell;	/* shell for cmd, or the login shell */
+	const char	 *cmd;		/* shell command, or NULL */
+	int		  argc;		/* argv form if cmd is NULL and argc > 0 */
+	char		**argv;
+	struct environ	 *env;		/* child environment, NULL to inherit */
+	const char	 *cwd;		/* working directory, NULL to inherit */
+
+	wchar_t		 *app;		/* resolved program */
+	wchar_t		 *cmdline;	/* CreateProcessW command line */
+	wchar_t		 *envblock;	/* CREATE_UNICODE_ENVIRONMENT block */
+	wchar_t		 *wcwd;		/* working directory actually used */
+};
+
+/* win32-spawn.c */
+int	 win32_spawn_prepare(struct win32_spawn *, char **);
+void	 win32_spawn_free(struct win32_spawn *);
+wchar_t	*win32_environ_block(struct environ *);
+char	*win32_path_from_posix(const char *);
+wchar_t	*win32_to_wide(const char *);
+char	*win32_from_wide(const wchar_t *);
+char	*win32_error_string(DWORD);
+int	 win32_exit_status(DWORD);
+HANDLE	 win32_job_create(void);
+
+/* Exit code of a child terminated by tmux with a signal. */
+#define WIN32_SIGNAL_EXIT_CODE(sig) (0xE0540000UL | (DWORD)(sig))
+
+/* win32-process.c: child registry (replaces SIGCHLD, waitpid and kill). */
+#define WIN32_STDIO_IN	0x1	/* child stdin is read from the socket */
+#define WIN32_STDIO_OUT	0x2	/* child stdout is written to the socket */
+#define WIN32_STDIO_ERR	0x4	/* child stderr is written to the socket */
+void	 win32_process_init(void);
+void	 win32_process_add(pid_t, HANDLE, HANDLE);
+pid_t	 win32_process_spawn(struct win32_spawn *, int, int *, char **);
+int	 win32_process_exec(const char *, const char *);
+int	 win32_process_kill(pid_t, int);
+pid_t	 win32_process_waitpid(pid_t, int *, int);
+
+/*
+ * Children are tracked by handle until reaped so a PID cannot be reused
+ * under tmux, and kill() takes down the whole job object of a child; these
+ * replace the win32_kill/win32_waitpid mappings above.
+ */
+#undef kill
+#define kill(pid, sig) win32_process_kill(pid, sig)
+#undef killpg
+#define killpg(pid, sig) win32_process_kill(pid, sig)
+#undef waitpid
+#define waitpid(pid, s, o) win32_process_waitpid(pid, s, o)
+
+/* win32-pty.c */
+struct win32_pty;
+struct win32_pty *win32_pty_spawn(struct win32_spawn *, int, int, pid_t *,
+	     char **);
+int	 win32_pty_resize(struct win32_pty *, int, int);
+void	 win32_pty_close(struct win32_pty *);
+int	 win32_pty_get_fd(struct win32_pty *);
+int	 win32_socket_drained(int);
+
+/* job.c */
+struct win32_pty *job_get_pty(struct job *);
 
 #endif /* WIN32_PLATFORM_H */

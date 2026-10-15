@@ -71,7 +71,11 @@ cmd_pipe_pane_exec(struct cmd *self, struct cmdq_item *item)
 	char				*cmd;
 	int				 old_fd, pipe_fd[2], in, out;
 	struct format_tree		*ft;
-#ifndef _WIN32
+#ifdef _WIN32
+	struct win32_spawn		 sp;
+	char				*cause;
+	int				 stdio = 0;
+#else
 	int				 null_fd;
 	sigset_t			 set, oldset;
 #endif
@@ -86,7 +90,11 @@ cmd_pipe_pane_exec(struct cmd *self, struct cmdq_item *item)
 	old_fd = wp->pipe_fd;
 	if (wp->pipe_fd != -1) {
 		bufferevent_free(wp->pipe_event);
+#ifdef _WIN32
+		closesocket((SOCKET)wp->pipe_fd);
+#else
 		close(wp->pipe_fd);
+#endif
 		wp->pipe_fd = -1;
 
 		if (window_pane_destroy_ready(wp)) {
@@ -117,11 +125,13 @@ cmd_pipe_pane_exec(struct cmd *self, struct cmdq_item *item)
 		out = 1;
 	}
 
+#ifndef _WIN32
 	/* Open the new pipe. */
 	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, pipe_fd) != 0) {
 		cmdq_error(item, "socketpair error: %s", strerror(errno));
 		return (CMD_RETURN_ERROR);
 	}
+#endif
 
 	/* Expand the command. */
 	ft = format_create(cmdq_get_client(item), item, FORMAT_NONE, 0);
@@ -131,23 +141,28 @@ cmd_pipe_pane_exec(struct cmd *self, struct cmdq_item *item)
 
 #ifdef _WIN32
 	/*
-	 * Windows: use CreateProcess with redirected pipes instead of
-	 * fork/exec.
+	 * Windows: the command's standard input is the pane output (-O) and
+	 * its standard output goes to the pane (-I), the rest is NUL.
 	 */
 	{
-		pid_t child_pid;
-
-		child_pid = win32_process_spawn(cmd, NULL, pipe_fd[1]);
-		if (child_pid == -1) {
-			cmdq_error(item, "spawn error");
-			close(pipe_fd[0]);
-			close(pipe_fd[1]);
+		(void)pipe_fd;
+		if (out)
+			stdio |= WIN32_STDIO_IN;
+		if (in)
+			stdio |= WIN32_STDIO_OUT;
+		memset(&sp, 0, sizeof sp);
+		sp.shell = _PATH_BSHELL;
+		sp.cmd = cmd;
+		wp->pipe_pid = win32_process_spawn(&sp, stdio, &wp->pipe_fd,
+		    &cause);
+		if (wp->pipe_pid == -1) {
+			cmdq_error(item, "spawn error: %s", cause);
+			free(cause);
+			wp->pipe_fd = -1;
 			free(cmd);
 			return (CMD_RETURN_ERROR);
 		}
-		close(pipe_fd[1]);
 
-		wp->pipe_fd = pipe_fd[0];
 		memcpy(wpo, &wp->offset, sizeof *wpo);
 
 		setblocking(wp->pipe_fd, 0);
@@ -275,7 +290,11 @@ cmd_pipe_pane_error_callback(__unused struct bufferevent *bufev,
 	log_debug("%%%u pipe error", wp->id);
 
 	bufferevent_free(wp->pipe_event);
+#ifdef _WIN32
+	closesocket((SOCKET)wp->pipe_fd);
+#else
 	close(wp->pipe_fd);
+#endif
 	wp->pipe_fd = -1;
 
 	if (window_pane_destroy_ready(wp))

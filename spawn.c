@@ -49,53 +49,6 @@ spawn_cwd_is_absolute(const char *cwd)
 #endif
 }
 
-#ifdef _WIN32
-/*
- * Build a Windows Unicode environment block from a tmux environ struct.
- * The block format is: L"KEY=VALUE\0KEY=VALUE\0\0" (wide strings).
- * Returns an allocated block suitable for CreateProcessW with
- * CREATE_UNICODE_ENVIRONMENT, or NULL on failure. Caller must free().
- */
-static char *
-environ_to_win32_block(struct environ *env)
-{
-	struct environ_entry	*ee;
-	size_t			 total = 0;
-	wchar_t			*block, *p;
-	int			 nlen, vlen;
-
-	/* First pass: calculate total wchar_t count needed. */
-	for (ee = environ_first(env); ee != NULL; ee = environ_next(ee)) {
-		if (ee->value == NULL || *ee->name == '\0')
-			continue;
-		nlen = MultiByteToWideChar(CP_UTF8, 0, ee->name, -1, NULL, 0);
-		vlen = MultiByteToWideChar(CP_UTF8, 0, ee->value, -1, NULL, 0);
-		/* name (without NUL) + '=' + value (with NUL as separator) */
-		total += (nlen - 1) + 1 + vlen;
-	}
-	total += 1; /* final NUL terminator */
-
-	block = xcalloc(total, sizeof(wchar_t));
-	p = block;
-
-	/* Second pass: build the block. */
-	for (ee = environ_first(env); ee != NULL; ee = environ_next(ee)) {
-		if (ee->value == NULL || *ee->name == '\0')
-			continue;
-		nlen = MultiByteToWideChar(CP_UTF8, 0, ee->name, -1, p,
-		    (int)(total - (p - block)));
-		p += nlen - 1; /* advance past name, overwrite NUL */
-		*p++ = L'=';
-		vlen = MultiByteToWideChar(CP_UTF8, 0, ee->value, -1, p,
-		    (int)(total - (p - block)));
-		p += vlen; /* advance past value including its NUL separator */
-	}
-	*p = L'\0'; /* final double-NUL terminator */
-
-	return ((char *)block);
-}
-#endif
-
 /*
  * Set up the environment and create a new window and pane or a new pane.
  *
@@ -334,7 +287,17 @@ spawn_pane(struct spawn_context *sc, char **cause)
 		}
 		if (sc->wp0->fd != -1) {
 			bufferevent_free(sc->wp0->event);
+#ifdef _WIN32
+			/* This also kills the old process tree. */
+			if (sc->wp0->win32_pty != NULL)
+				win32_pty_close(sc->wp0->win32_pty);
+			else
+				closesocket((SOCKET)sc->wp0->fd);
+			sc->wp0->win32_pty = NULL;
+			sc->wp0->fd = -1;
+#else
 			close(sc->wp0->fd);
+#endif
 		}
 		window_pane_reset_mode_all(sc->wp0);
 		screen_reinit(&sc->wp0->base);
@@ -461,44 +424,29 @@ spawn_pane(struct spawn_context *sc, char **cause)
 #ifdef _WIN32
 	{
 		/*
-		 * Windows: use ConPTY + CreateProcess instead of fdforkpty.
-		 * Build command line, create pseudo console, launch process.
+		 * Windows: start the process on a pseudo console. As on Unix,
+		 * one argument is a shell command, more are run directly and
+		 * none starts the shell.
 		 */
 		struct win32_pty	*pty;
-		char			*cmdline, *envblock;
-		const char		*shell = new_wp->shell;
+		struct win32_spawn	 sp;
 
-		if (new_wp->argc == 1) {
-			xasprintf(&cmdline, "\"%s\" /c %s", shell,
-			    new_wp->argv[0]);
-		} else if (new_wp->argc > 1) {
-			int i;
-			size_t total = 0;
-			for (i = 0; i < new_wp->argc; i++)
-				total += strlen(new_wp->argv[i]) + 1;
-			cmdline = xmalloc(total + 1);
-			*cmdline = '\0';
-			for (i = 0; i < new_wp->argc; i++) {
-				if (i > 0)
-					strlcat(cmdline, " ", total + 1);
-				strlcat(cmdline, new_wp->argv[i], total + 1);
-			}
-		} else {
-			/* Login shell. */
-			xasprintf(&cmdline, "\"%s\"", shell);
+		memset(&sp, 0, sizeof sp);
+		sp.shell = new_wp->shell;
+		if (new_wp->argc == 1)
+			sp.cmd = new_wp->argv[0];
+		else if (new_wp->argc > 1) {
+			sp.argc = new_wp->argc;
+			sp.argv = new_wp->argv;
 		}
+		sp.env = child;
+		sp.cwd = new_wp->cwd;
 
-		envblock = environ_to_win32_block(child);
-		pty = win32_pty_spawn(cmdline,
-		    new_wp->cwd ? new_wp->cwd : ".",
-		    envblock,
-		    (int)ws.ws_col, (int)ws.ws_row,
-		    &new_wp->pid);
-		free(envblock);
-		free(cmdline);
-
+		pty = win32_pty_spawn(&sp, ws.ws_col, ws.ws_row, &new_wp->pid,
+		    &cp);
 		if (pty == NULL) {
-			xasprintf(cause, "spawn failed");
+			xasprintf(cause, "create process failed: %s", cp);
+			free(cp);
 			new_wp->fd = -1;
 			if (~sc->flags & SPAWN_RESPAWN) {
 				server_client_remove_pane(new_wp);
@@ -512,9 +460,6 @@ spawn_pane(struct spawn_context *sc, char **cause)
 		new_wp->fd = win32_pty_get_fd(pty);
 		new_wp->win32_pty = pty;
 		strlcpy(new_wp->tty, "conpty", sizeof new_wp->tty);
-
-		/* Watch for child exit. */
-		win32_process_watch(win32_pty_get_process(pty), new_wp->pid);
 		goto complete;
 	}
 #else

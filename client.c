@@ -629,14 +629,13 @@ static __dead void
 client_exec(const char *shell, const char *shellcmd)
 {
 #ifdef _WIN32
-	char cmd[32768];
-
 	log_debug("shell %s, command %s", shell, shellcmd);
+	setenv("SHELL", shell, 1);
+
 	proc_clear_signals(client_proc, 1);
 
-	snprintf(cmd, sizeof cmd, "\"%s\" /c %s", shell, shellcmd);
-	system(cmd);
-	exit(0);
+	/* There is no exec: run it and exit with its status. */
+	exit(win32_process_exec(shell, shellcmd));
 #else
 	char	*argv0;
 

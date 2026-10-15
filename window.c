@@ -390,18 +390,23 @@ window_destroy(struct window *w)
 int
 window_pane_destroy_ready(struct window_pane *wp)
 {
+#ifndef _WIN32
 	int	n;
-
-	if (wp->pipe_fd != -1) {
-		if (EVBUFFER_LENGTH(wp->pipe_event->output) != 0)
-			return (0);
-#ifdef _WIN32
-		/* On Windows, skip FIONREAD ioctl (not applicable to sockets here). */
-#else
-		if (ioctl(wp->fd, FIONREAD, &n) != -1 && n > 0)
-			return (0);
 #endif
-	}
+
+	if (wp->pipe_fd != -1 && EVBUFFER_LENGTH(wp->pipe_event->output) != 0)
+		return (0);
+#ifdef _WIN32
+	/*
+	 * The process can exit before the pseudo console has sent the last of
+	 * its output, which is followed by end of file: wait for that.
+	 */
+	if (wp->fd != -1 && !win32_socket_drained(wp->fd))
+		return (0);
+#else
+	if (ioctl(wp->fd, FIONREAD, &n) != -1 && n > 0)
+		return (0);
+#endif
 
 	if (~wp->flags & PANE_EXITED)
 		return (0);
@@ -1197,13 +1202,15 @@ window_pane_destroy(struct window_pane *wp)
 #endif
 		bufferevent_free(wp->event);
 #ifdef _WIN32
-		if (wp->win32_pty != NULL) {
-			win32_pty_close((struct win32_pty *)wp->win32_pty);
-			wp->win32_pty = NULL;
-			wp->fd = -1;
-		} else
-#endif
+		if (wp->win32_pty != NULL)
+			win32_pty_close(wp->win32_pty);
+		else
+			closesocket((SOCKET)wp->fd);
+		wp->win32_pty = NULL;
+		wp->fd = -1;
+#else
 		close(wp->fd);
+#endif
 	}
 	if (wp->ictx != NULL)
 		input_free(wp->ictx);
@@ -1214,7 +1221,11 @@ window_pane_destroy(struct window_pane *wp)
 
 	if (wp->pipe_fd != -1) {
 		bufferevent_free(wp->pipe_event);
+#ifdef _WIN32
+		closesocket((SOCKET)wp->pipe_fd);
+#else
 		close(wp->pipe_fd);
+#endif
 	}
 
 	if (event_initialized(&wp->resize_timer))

@@ -61,6 +61,9 @@ struct job {
 
 	int			 fd;
 	struct bufferevent	*event;
+#ifdef _WIN32
+	struct win32_pty	*pty;
+#endif
 
 	job_update_cb		 updatecb;
 	job_complete_cb		 completecb;
@@ -84,11 +87,12 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 	struct environ	 *env;
 	pid_t		  pid;
 #ifdef _WIN32
-	int		  out[2];
-	const char	 *shell;
-	char		 *cmdline, *argv0;
-	struct options	 *oo;
-	struct win32_pty *pty = NULL;
+	int			 fd, stdio;
+	const char		*shell;
+	char			*argv0, *cause;
+	struct options		*oo;
+	struct win32_pty	*pty = NULL;
+	struct win32_spawn	 sp;
 #else
 	int		  nullfd, out[2], master, do_close = 1;
 	const char	 *home, *shell;
@@ -130,30 +134,31 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 	}
 
 #ifdef _WIN32
-	/* Windows: use ConPTY for PTY jobs, pipes + CreateProcess otherwise. */
+	/*
+	 * Windows: a pseudo console for PTY jobs, otherwise pipes bridged to
+	 * a socket. Both get the environment built above.
+	 */
+	if (cmd != NULL && (flags & JOB_DEFAULTSHELL))
+		environ_set(env, "SHELL", 0, "%s", shell);
+	memset(&sp, 0, sizeof sp);
+	sp.shell = shell;
+	sp.cmd = cmd;
+	sp.argc = argc;
+	sp.argv = argv;
+	sp.env = env;
+	sp.cwd = cwd;
 	if (flags & JOB_PTY) {
-		if (cmd != NULL)
-			xasprintf(&cmdline, "%s /c %s", shell, cmd);
-		else
-			cmdline = cmd_stringify_argv(argc, argv);
-		pty = win32_pty_spawn(cmdline, cwd, NULL, sx, sy, &pid);
-		free(cmdline);
+		pty = win32_pty_spawn(&sp, sx, sy, &pid, &cause);
 		if (pty == NULL)
-			goto fail;
+			goto fail_spawn;
+		fd = win32_pty_get_fd(pty);
 	} else {
-		if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, out) != 0)
-			goto fail;
-		if (cmd != NULL)
-			xasprintf(&cmdline, "%s /c %s", shell, cmd);
-		else
-			cmdline = cmd_stringify_argv(argc, argv);
-		pid = win32_process_spawn(cmdline, cwd, out[1]);
-		free(cmdline);
-		if (pid == -1) {
-			close(out[0]);
-			close(out[1]);
-			goto fail;
-		}
+		stdio = WIN32_STDIO_IN|WIN32_STDIO_OUT;
+		if (flags & JOB_SHOWSTDERR)
+			stdio |= WIN32_STDIO_ERR;
+		pid = win32_process_spawn(&sp, stdio, &fd, &cause);
+		if (pid == -1)
+			goto fail_spawn;
 	}
 
 	environ_free(env);
@@ -178,11 +183,9 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 	job->data = data;
 
 	if (flags & JOB_PTY)
-		job->fd = win32_pty_get_fd(pty);
-	else {
-		close(out[1]);
-		job->fd = out[0];
-	}
+		strlcpy(job->tty, "conpty", sizeof job->tty);
+	job->fd = fd;
+	job->pty = pty;
 	setblocking(job->fd, 0);
 #else
 	sigfillset(&set);
@@ -303,14 +306,30 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 	log_debug("run job %p: %s, pid %ld", job, job->cmd, (long)job->pid);
 	return (job);
 
+#ifdef _WIN32
+fail_spawn:
+	log_debug("%s: %s", __func__, cause);
+	free(cause);
+#else
 fail:
-#ifndef _WIN32
 	sigprocmask(SIG_SETMASK, &oldset, NULL);
 #endif
 	environ_free(env);
 	free(argv0);
 	return (NULL);
 }
+
+#ifdef _WIN32
+/*
+ * Get the pseudo console of a PTY job; it goes with the file descriptor
+ * when the job is transferred.
+ */
+struct win32_pty *
+job_get_pty(struct job *job)
+{
+	return (job->pty);
+}
+#endif
 
 /* Take job's file descriptor and free the job. */
 int
@@ -350,12 +369,27 @@ job_free(struct job *job)
 	if (job->freecb != NULL && job->data != NULL)
 		job->freecb(job->data);
 
+#ifdef _WIN32
+	/*
+	 * Closing a pseudo console asks its processes to exit and then kills
+	 * any left, so only kill other jobs here.
+	 */
+	if (job->pid != -1 && job->pty == NULL)
+		kill(job->pid, SIGTERM);
+	if (job->event != NULL)
+		bufferevent_free(job->event);
+	if (job->pty != NULL)
+		win32_pty_close(job->pty);
+	else if (job->fd != -1)
+		closesocket((SOCKET)job->fd);
+#else
 	if (job->pid != -1)
 		kill(job->pid, SIGTERM);
 	if (job->event != NULL)
 		bufferevent_free(job->event);
 	if (job->fd != -1)
 		close(job->fd);
+#endif
 
 	free(job);
 }
@@ -374,12 +408,7 @@ job_resize(struct job *job, u_int sx, u_int sy)
 	log_debug("resize job %p: %ux%u", job, sx, sy);
 
 #ifdef _WIN32
-	/*
-	 * On Windows, PTY resize is handled via ConPTY at the window pane
-	 * level (window.c calls win32_pty_resize). Job-level PTY resize
-	 * is not yet implemented.
-	 */
-	log_debug("job_resize: not implemented on Windows");
+	win32_pty_resize(job->pty, sx, sy);
 #else
 	memset(&ws, 0, sizeof ws);
 	ws.ws_col = sx;
