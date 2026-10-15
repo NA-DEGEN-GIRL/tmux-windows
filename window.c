@@ -474,8 +474,10 @@ window_resize(struct window *w, u_int sx, u_int sy, int xpixel, int ypixel)
 void
 window_pane_send_resize(struct window_pane *wp, u_int sx, u_int sy)
 {
+#ifndef _WIN32
 	struct window	*w = wp->window;
 	struct winsize	 ws;
+#endif
 
 	if (wp->fd == -1)
 		return;

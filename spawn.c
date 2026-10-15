@@ -229,17 +229,20 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	struct window_pane	 *new_wp;
 	struct environ		 *child;
 	struct environ_entry	 *ee;
-	char			**argv, *cp, **argvp, *argv0, *cwd, *new_cwd;
-	char			  path[PATH_MAX];
+	char			**argv, *cp, *cwd, *new_cwd;
 	const char		 *cmd, *tmp, *home = find_home();
 	const char		 *actual_cwd = NULL;
 	int			  argc;
 	u_int			  idx;
-	struct termios		  now;
 	u_int			  hlimit;
 	struct winsize		  ws;
+#ifndef _WIN32
+	char			**argvp, *argv0;
+	char			  path[PATH_MAX];
+	struct termios		  now;
 	sigset_t		  set, oldset;
 	key_code		  key;
+#endif
 
 	if (item != NULL) {
 		ts = cmdq_get_target(item)->s;
