@@ -166,13 +166,15 @@ cmd_source_file_exec(struct cmd *self, struct cmdq_item *item)
 	struct client			*c = cmdq_get_client(item);
 	enum cmd_retval			 retval = CMD_RETURN_NORMAL;
 	char				*pattern, *cwd, *expanded = NULL;
-	const char			*path, *error;
+	const char			*path;
 #ifndef _WIN32
+	const char			*error;
 	glob_t				 g;
 	int				 result;
+	u_int				 j;
 #endif
 	int				 parse_flags;
-	u_int				 i, j;
+	u_int				 i;
 
 	if (c == NULL) {
 		if (cmd_source_file_depth >= CMD_SOURCE_FILE_DEPTH_LIMIT) {

@@ -41,6 +41,175 @@ static int	file_next_stream = 3;
 
 RB_GENERATE(client_files, client_file, entry, file_cmp);
 
+#ifdef _WIN32
+/*
+ * libevent's select() backend can only wait on sockets, so on Windows the
+ * client cannot put a bufferevent on a file, pipe or console. Reads are done
+ * by a thread that feeds a socket pair (so stdin can still be streamed and
+ * cancelled) and writes are done synchronously. Paths are UTF-8.
+ */
+struct file_reader {
+	int	fd;		/* CRT descriptor being read */
+	SOCKET	s;		/* our end of the socket pair */
+	int	console;	/* strip CR before LF */
+	int	pipe;		/* zero-length reads are not EOF */
+};
+
+/* Open a file with a UTF-8 path. */
+static int
+file_open(const char *path, int flags)
+{
+	wchar_t	*wpath;
+	DWORD	 attr;
+	int	 fd;
+
+	if ((wpath = win32_ipc_utf8_to_wide(path)) == NULL) {
+		errno = EINVAL;
+		return (-1);
+	}
+	attr = GetFileAttributesW(wpath);
+	if (attr != INVALID_FILE_ATTRIBUTES &&
+	    (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+		free(wpath);
+		errno = EISDIR;
+		return (-1);
+	}
+	fd = _wopen(wpath, flags|_O_BINARY|_O_NOINHERIT, _S_IREAD|_S_IWRITE);
+	free(wpath);
+	return (fd);
+}
+
+/* Open a file with a UTF-8 path as a stdio stream. */
+static FILE *
+file_fopen(const char *path, const char *mode)
+{
+	wchar_t	*wpath, wmode[8];
+	FILE	*f;
+	size_t	 i;
+
+	for (i = 0; mode[i] != '\0' && i < nitems(wmode) - 1; i++)
+		wmode[i] = (wchar_t)(u_char)mode[i];
+	wmode[i] = L'\0';
+
+	if ((wpath = win32_ipc_utf8_to_wide(path)) == NULL) {
+		errno = EINVAL;
+		return (NULL);
+	}
+	f = _wfopen(wpath, wmode);
+	free(wpath);
+	return (f);
+}
+
+/* Write all of a buffer to a descriptor. */
+static int
+file_write_all(int fd, const char *buf, size_t len)
+{
+	int	n;
+
+	while (len > 0) {
+		n = _write(fd, buf, len > INT_MAX ? INT_MAX : (u_int)len);
+		if (n <= 0)
+			return (-1);
+		buf += n;
+		len -= n;
+	}
+	return (0);
+}
+
+/* Reader thread: copy a file, pipe or console into a socket. */
+static DWORD WINAPI
+file_reader_thread(LPVOID arg)
+{
+	struct file_reader	*fr = arg;
+	HANDLE			 h = (HANDLE)_get_osfhandle(fr->fd);
+	char			 buf[16384], *in, *out;
+	DWORD			 n, error;
+	int			 failed = 0, sent;
+	struct linger		 lg;
+
+	for (;;) {
+		if (!ReadFile(h, buf, sizeof buf, &n, NULL)) {
+			error = GetLastError();
+			if (error != ERROR_BROKEN_PIPE &&
+			    error != ERROR_HANDLE_EOF)
+				failed = 1;
+			break;
+		}
+		if (n == 0) {
+			if (fr->pipe)
+				continue;
+			break;
+		}
+		if (fr->console) {
+			for (in = out = buf; in < buf + n; in++) {
+				if (in[0] == '\r' && in + 1 < buf + n &&
+				    in[1] == '\n')
+					continue;
+				*out++ = *in;
+			}
+			n = (DWORD)(out - buf);
+		}
+		for (in = buf; n > 0; in += sent, n -= sent) {
+			sent = send(fr->s, in, (int)n, 0);
+			if (sent <= 0)
+				goto out; /* cancelled */
+		}
+	}
+
+out:
+	if (failed) {
+		/* Reset the connection so the reader sees an error. */
+		lg.l_onoff = 1;
+		lg.l_linger = 0;
+		setsockopt(fr->s, SOL_SOCKET, SO_LINGER, (char *)&lg,
+		    sizeof lg);
+	}
+	closesocket(fr->s);
+	_close(fr->fd);
+	free(fr);
+	return (0);
+}
+
+/*
+ * Start a reader thread for a descriptor, which it takes over. Returns the
+ * socket to read from or -1.
+ */
+static int
+file_start_reader(int fd)
+{
+	struct file_reader	*fr;
+	HANDLE			 h, thread;
+	DWORD			 mode;
+	int			 sv[2];
+
+	if (win32_ipc_socketpair(sv) != 0) {
+		errno = EMFILE;
+		return (-1);
+	}
+
+	fr = xcalloc(1, sizeof *fr);
+	fr->fd = fd;
+	fr->s = (SOCKET)sv[1];
+	h = (HANDLE)_get_osfhandle(fd);
+	fr->console = GetConsoleMode(h, &mode);
+	fr->pipe = (GetFileType(h) == FILE_TYPE_PIPE);
+
+	thread = CreateThread(NULL, 0, file_reader_thread, fr, 0, NULL);
+	if (thread == NULL) {
+		closesocket((SOCKET)sv[0]);
+		closesocket((SOCKET)sv[1]);
+		free(fr);
+		errno = EAGAIN;
+		return (-1);
+	}
+	CloseHandle(thread);
+	setblocking(sv[0], 0);
+	return (sv[0]);
+}
+#else
+#define file_fopen(path, mode) fopen(path, mode)
+#endif
+
 /* Get path for file, either as given or from working directory. */
 static char *
 file_get_path(struct client *c, const char *file)
@@ -336,7 +505,7 @@ file_write(struct client *c, const char *path, int flags, const void *bdata,
 			mode = "ab";
 		else
 			mode = "wb";
-		f = fopen(cf->path, mode);
+		f = file_fopen(cf->path, mode);
 		if (f == NULL) {
 			cf->error = errno;
 			goto done;
@@ -406,7 +575,7 @@ file_read(struct client *c, const char *path, client_file_cb cb, void *cbdata)
 	cf->path = file_get_path(c, path);
 
 	if (c == NULL || c->flags & CLIENT_ATTACHED) {
-		f = fopen(cf->path, "rb");
+		f = file_fopen(cf->path, "rb");
 		if (f == NULL) {
 			cf->error = errno;
 			goto done;
@@ -613,7 +782,11 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 
 	cf->fd = -1;
 	if (msg->fd == -1)
+#ifdef _WIN32
+		cf->fd = file_open(path, msg->flags|flags);
+#else
 		cf->fd = open(path, msg->flags|flags, 0644);
+#endif
 	else if (allow_streams) {
 		if (msg->fd != STDOUT_FILENO && msg->fd != STDERR_FILENO)
 			errno = EBADF;
@@ -631,15 +804,11 @@ file_write_open(struct client_files *files, struct tmuxpeer *peer,
 
 #ifdef _WIN32
 	/*
-	 * On Windows, stdout/stderr are CRT file descriptors (console
-	 * handles), not Winsock sockets. libevent's bufferevent uses
-	 * select() which only works with sockets on Windows.  Skip the
-	 * bufferevent; file_write_data() will write directly to cf->fd.
+	 * Files, pipes and consoles are not sockets, so libevent cannot wait
+	 * for them: file_write_data() writes to cf->fd directly instead.
 	 */
-	if (msg->fd == STDOUT_FILENO || msg->fd == STDERR_FILENO) {
-		cf->event = NULL;
-		goto reply;
-	}
+	cf->event = NULL;
+	goto reply;
 #endif
 	cf->event = bufferevent_new(cf->fd, NULL, file_write_callback,
 	    file_write_error_callback, cf);
@@ -673,9 +842,13 @@ file_write_data(struct client_files *files, struct imsg *imsg)
 	if (cf->event != NULL)
 		bufferevent_write(cf->event, msg + 1, size);
 #ifdef _WIN32
-	else if (cf->fd != -1) {
-		/* Direct write for non-socket fds (stdout/stderr). */
-		_write(cf->fd, msg + 1, (unsigned int)size);
+	else if (cf->fd != -1 &&
+	    file_write_all(cf->fd, (const char *)(msg + 1), size) != 0) {
+		log_debug("write error file %d", cf->stream);
+		close(cf->fd);
+		cf->fd = -1;
+		if (cf->cb != NULL)
+			cf->cb(NULL, NULL, 0, -1, NULL, cf->data);
 	}
 #endif
 }
@@ -721,7 +894,11 @@ file_read_error_callback(__unused struct bufferevent *bev, short what,
 	proc_send(cf->peer, MSG_READ_DONE, -1, &msg, sizeof msg);
 
 	bufferevent_free(cf->event);
+#ifdef _WIN32
+	closesocket((SOCKET)cf->fd); /* reader thread's socket */
+#else
 	close(cf->fd);
+#endif
 	RB_REMOVE(client_files, cf->tree, cf);
 	file_free(cf);
 }
@@ -771,6 +948,9 @@ file_read_open(struct client_files *files, struct tmuxpeer *peer,
 	struct client_file	 find, *cf;
 	const int		 flags = O_NONBLOCK|O_RDONLY;
 	int			 error;
+#ifdef _WIN32
+	int			 reader;
+#endif
 
 	if (msglen < sizeof *msg)
 		fatalx("bad MSG_READ_OPEN size");
@@ -793,7 +973,11 @@ file_read_open(struct client_files *files, struct tmuxpeer *peer,
 
 	cf->fd = -1;
 	if (msg->fd == -1)
+#ifdef _WIN32
+		cf->fd = file_open(path, flags);
+#else
 		cf->fd = open(path, flags);
+#endif
 	else if (allow_streams) {
 		if (msg->fd != STDIN_FILENO)
 			errno = EBADF;
@@ -811,17 +995,17 @@ file_read_open(struct client_files *files, struct tmuxpeer *peer,
 
 #ifdef _WIN32
 	/*
-	 * On Windows, stdin is a CRT file descriptor (console handle),
-	 * not a Winsock socket. libevent's bufferevent uses select()
-	 * which only works with sockets. Send an immediate read-done
-	 * with no data for stdin.
+	 * Files, pipes and consoles are not sockets, so libevent cannot wait
+	 * for them: a thread reads into a socket pair and the bufferevent
+	 * reads the other end.
 	 */
-	if (msg->fd == STDIN_FILENO) {
+	if ((reader = file_start_reader(cf->fd)) == -1) {
+		error = errno;
 		close(cf->fd);
 		cf->fd = -1;
-		error = 0;
 		goto reply;
 	}
+	cf->fd = reader;
 #endif
 	cf->event = bufferevent_new(cf->fd, file_read_callback, NULL,
 	    file_read_error_callback, cf);
@@ -847,8 +1031,20 @@ file_read_cancel(struct client_files *files, struct imsg *imsg)
 	if (msglen != sizeof *msg)
 		fatalx("bad MSG_READ_CANCEL size");
 	find.stream = msg->stream;
+#ifdef _WIN32
+	/*
+	 * The read may have finished (reaching end of file on the reader
+	 * thread) while the cancel was on its way.
+	 */
+	if ((cf = RB_FIND(client_files, files, &find)) == NULL ||
+	    cf->event == NULL) {
+		log_debug("cancel finished file %d", msg->stream);
+		return;
+	}
+#else
 	if ((cf = RB_FIND(client_files, files, &find)) == NULL)
 		fatalx("unknown stream number");
+#endif
 	log_debug("cancel file %d", cf->stream);
 
 	file_read_error_callback(NULL, 0, cf);
