@@ -33,6 +33,9 @@
 /* Console host of a process not looked up yet. */
 #define OSDEP_HOST_UNKNOWN ((DWORD)-1)
 
+/* Age (in milliseconds) after which a process keeps its console host. */
+#define OSDEP_HOST_SETTLE_MS 5000
+
 /*
  * A shell that was busy more than this long (in milliseconds) after starting
  * a command has put it in the background. Shells start waiting for a
@@ -362,6 +365,14 @@ osdep_console_host(struct osdep_proc *p)
 			p->host = (DWORD)(value & ~(ULONG_PTR)3);
 		CloseHandle(h);
 	}
+
+	/*
+	 * A new process may not be attached to its final console yet (a pane
+	 * process first reports another console host, and MSYS2 starts its
+	 * processes suspended), so remember only the hosts of older ones.
+	 */
+	if (osdep_snap.now - p->created < OSDEP_HOST_SETTLE_MS * 10000ULL)
+		return (p->host);
 
 	osdep_host_list = xreallocarray(osdep_host_list, osdep_nhosts + 1,
 	    sizeof *osdep_host_list);
