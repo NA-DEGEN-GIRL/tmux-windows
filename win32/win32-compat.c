@@ -308,13 +308,20 @@ win32_kill(pid_t pid, int sig)
 	return (0);
 }
 
-/* socketpair: create connected TCP pair via localhost. */
+/*
+ * socketpair: create a connected TCP pair over loopback. The sockets are
+ * not inheritable, so child processes do not hold tmux's connections open.
+ * Another local process could connect to the listener first, so check that
+ * the accepted connection really is ours.
+ */
 int
 win32_socketpair(int domain, int type, int protocol, int sv[2])
 {
-	SOCKET listener, s1, s2;
-	struct sockaddr_in addr;
-	int addrlen = sizeof addr;
+	SOCKET			listener, s1 = INVALID_SOCKET;
+	SOCKET			s2 = INVALID_SOCKET;
+	struct sockaddr_in	addr, local, peer;
+	int			addrlen, tries, one = 1;
+	DWORD			flags;
 
 	(void)domain;
 	(void)type;
@@ -322,7 +329,9 @@ win32_socketpair(int domain, int type, int protocol, int sv[2])
 
 	win32_wsa_init();
 
-	listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	flags = WSA_FLAG_OVERLAPPED|WSA_FLAG_NO_HANDLE_INHERIT;
+	listener = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0,
+	    flags);
 	if (listener == INVALID_SOCKET)
 		return (-1);
 
@@ -331,34 +340,51 @@ win32_socketpair(int domain, int type, int protocol, int sv[2])
 	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	addr.sin_port = 0; /* ephemeral */
 
+	addrlen = sizeof addr;
 	if (bind(listener, (struct sockaddr *)&addr, sizeof addr) != 0)
 		goto fail;
 	if (getsockname(listener, (struct sockaddr *)&addr, &addrlen) != 0)
 		goto fail;
-	if (listen(listener, 1) != 0)
+	if (listen(listener, SOMAXCONN) != 0)
 		goto fail;
 
-	s1 = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	s1 = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, flags);
 	if (s1 == INVALID_SOCKET)
 		goto fail;
-	if (connect(s1, (struct sockaddr *)&addr, sizeof addr) != 0) {
-		closesocket(s1);
+	if (connect(s1, (struct sockaddr *)&addr, sizeof addr) != 0)
 		goto fail;
-	}
-
-	s2 = accept(listener, NULL, NULL);
-	if (s2 == INVALID_SOCKET) {
-		closesocket(s1);
+	addrlen = sizeof local;
+	if (getsockname(s1, (struct sockaddr *)&local, &addrlen) != 0)
 		goto fail;
-	}
 
+	for (tries = 0; tries < 16; tries++) {
+		addrlen = sizeof peer;
+		s2 = accept(listener, (struct sockaddr *)&peer, &addrlen);
+		if (s2 == INVALID_SOCKET)
+			goto fail;
+		if (addrlen == sizeof peer &&
+		    peer.sin_port == local.sin_port &&
+		    peer.sin_addr.s_addr == local.sin_addr.s_addr)
+			break;
+		closesocket(s2);
+		s2 = INVALID_SOCKET;
+	}
+	if (s2 == INVALID_SOCKET)
+		goto fail;
+	SetHandleInformation((HANDLE)s2, HANDLE_FLAG_INHERIT, 0);
 	closesocket(listener);
+
+	/* Small writes (keystrokes) should not wait for Nagle. */
+	setsockopt(s1, IPPROTO_TCP, TCP_NODELAY, (char *)&one, sizeof one);
+	setsockopt(s2, IPPROTO_TCP, TCP_NODELAY, (char *)&one, sizeof one);
 
 	sv[0] = (int)s1;
 	sv[1] = (int)s2;
 	return (0);
 
 fail:
+	if (s1 != INVALID_SOCKET)
+		closesocket(s1);
 	closesocket(listener);
 	return (-1);
 }
