@@ -411,7 +411,7 @@ a timeout rather than sleeping.
 - `win32-kill`: `kill()` and `waitpid()` of the child registry; a job ID
   that is no longer a live child never signals a bystander process.
 
-CI runs `ctest -L unit`, which selects `win32-tparm` only.
+CI runs `ctest -L unit`, which selects all three.
 
 ### Scripts
 

@@ -528,6 +528,7 @@ if(BUILD_TESTING)
     target_link_libraries(win32-kill-test PRIVATE ${TMUX_TEST_LIBRARIES})
     set_property(TARGET win32-kill-test PROPERTY C_STANDARD 11)
     add_test(NAME win32-kill COMMAND win32-kill-test)
+    set_tests_properties(win32-kill PROPERTIES LABELS unit)
 endif()
 
 # Unit tests for the Windows text support: terminfo expansion, strftime,
@@ -564,6 +565,7 @@ if(BUILD_TESTING)
     )
     set_property(TARGET win32-text-unit-test PROPERTY C_STANDARD 11)
     add_test(NAME win32-text-unit COMMAND win32-text-unit-test)
+    set_tests_properties(win32-text-unit PROPERTIES LABELS unit)
 endif()
 
 # Install

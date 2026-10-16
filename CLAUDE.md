@@ -96,8 +96,8 @@ timeout (`TMUX_TEST_TIMEOUT`, default 600 s); exit 77 means skipped:
 - `win32-pane-info.sh` — pane_current_command/path and automatic-rename
 - `win32-install.sh` — install-user.ps1 against a scratch directory and registry key
 
-ctest also has three native unit tests: `win32-tparm` (label `unit`, the
-only one CI runs), `win32-text-unit` and `win32-kill` (no label), and
+ctest also has three native unit tests, `win32-tparm`, `win32-text-unit` and
+`win32-kill` (label `unit`, all run by CI), and
 registers each script (label `regress`, server label `ctest-<name>`).
 
 ## Winget Package Submission
