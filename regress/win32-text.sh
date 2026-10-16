@@ -432,8 +432,20 @@ done
 check "cursor style and colour reach the terminal" "bar #ff0000" "$c"
 $INNER send-keys -ts C-c
 
-$INNER send-keys -ts "clear; echo COPY_ME_42" Enter
-wait_for "$INNER" s "^COPY_ME_42" || fail "clipboard setup"
+# The console discards typeahead when it delivers Ctrl-C: retype until the
+# command runs.
+n=0
+ok=0
+while [ $n -lt 3 ]; do
+	sleep 1
+	$INNER send-keys -ts "clear; echo COPY_ME_42" Enter
+	if wait_for "$INNER" s "^COPY_ME_42"; then
+		ok=1
+		break
+	fi
+	n=$((n + 1))
+done
+[ $ok -eq 1 ] || fail "clipboard setup"
 $INNER copy-mode -ts
 $INNER send-keys -ts -X search-backward 'COPY_ME_42'
 $INNER send-keys -ts -X begin-selection

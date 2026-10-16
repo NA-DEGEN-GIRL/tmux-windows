@@ -112,7 +112,16 @@ check 5 "Escape key" keys:0 ESC_OK
 $TMUX send-keys -tkeys:1 "sleep 60; echo SLEEP_DONE" Enter
 sleep 2
 $TMUX send-keys -tkeys:1 C-c
-$TMUX send-keys -tkeys:1 'echo $((6*7))' Enter
+# The console discards typeahead when it delivers Ctrl-C, so a command typed
+# straight after can be lost on a slow machine: retype it until it runs. If
+# Ctrl-C did not interrupt sleep 60, nothing runs in time and this fails.
+n=0
+while [ $n -lt 3 ]; do
+	sleep 1
+	$TMUX send-keys -tkeys:1 'echo $((6*7))' Enter
+	wait_for 5 shows keys:1 42 && break
+	n=$((n + 1))
+done
 check 6 "Ctrl-C interrupt" keys:1 42
 [ "$(lines keys:1 SLEEP_DONE)" -eq 0 ] ||
     fail "6: the interrupted command list went on"
