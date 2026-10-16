@@ -173,9 +173,10 @@ function Stop-InstalledTmux {
     }
 
     # A server's command line is: tmux.exe -D -S "tmux-<user>-<label>" ...
+    # (newer servers quote every argument: "-D" "-S" "tmux-<user>-<label>").
     $sockets = @($processes | ForEach-Object {
-            if ($_.CommandLine -match '\s-D\b' -and
-                $_.CommandLine -match '\s-S\s*(?:"([^"]+)"|(\S+))') {
+            if ($_.CommandLine -match '\s"?-D"?(\s|$)' -and
+                $_.CommandLine -match '\s"?-S"?\s*(?:"([^"]+)"|(\S+))') {
                 if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
             }
         } | Sort-Object -Unique)
