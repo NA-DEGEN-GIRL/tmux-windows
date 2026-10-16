@@ -78,6 +78,66 @@ $InstallDir = $PSCmdlet.GetUnresolvedProviderPathFromPSPath($InstallDir).TrimEnd
 $BuildExe = $PSCmdlet.GetUnresolvedProviderPathFromPSPath($BuildExe)
 $InstalledExe = Join-Path $InstallDir 'tmux.exe'
 
+# Name of the packaged app whose container this process runs in, or $null.
+# Programs started from a packaged (MSIX) app, such as the Claude desktop
+# app, can have their writes to %LOCALAPPDATA% (and HKEY_CURRENT_USER)
+# redirected into %LOCALAPPDATA%\Packages\<app>\LocalCache even without a
+# package identity of their own, so an install from there is invisible to
+# ordinary terminals. Detect it by writing a probe and seeing where it lands.
+function Get-RedirectingPackage {
+    $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
+    $packages = Join-Path $localAppData 'Packages'
+    if (!(Test-Path -LiteralPath $packages)) {
+        return $null
+    }
+    $probe = 'tmux-install-probe-' + [Guid]::NewGuid().ToString('N')
+    $path = Join-Path $localAppData $probe
+    try {
+        New-Item -ItemType Directory -Path $path -WhatIf:$false |
+            Out-Null
+    } catch {
+        return $null
+    }
+    try {
+        foreach ($dir in (Get-ChildItem -LiteralPath $packages -Directory `
+                -ErrorAction SilentlyContinue)) {
+            $copy = Join-Path $dir.FullName "LocalCache\Local\$probe"
+            if (Test-Path -LiteralPath $copy) {
+                return $dir.Name
+            }
+        }
+        return $null
+    } finally {
+        Remove-Item -LiteralPath $path -Force -WhatIf:$false `
+            -ErrorAction SilentlyContinue
+    }
+}
+
+$package = Get-RedirectingPackage
+if ($package) {
+    $localAppData = [IO.Path]::GetFullPath([Environment]::GetFolderPath(
+        'LocalApplicationData')).TrimEnd('\')
+    $redirected = @()
+    if ([string]::Equals($InstallDir, $localAppData,
+            [StringComparison]::OrdinalIgnoreCase) -or
+        $InstallDir.StartsWith($localAppData + '\',
+            [StringComparison]::OrdinalIgnoreCase)) {
+        $redirected += "files under $localAppData"
+    }
+    if (!$NoPathUpdate) {
+        $redirected += 'the user PATH (HKEY_CURRENT_USER)'
+    }
+    if ($redirected.Count -gt 0) {
+        Write-Warning (("This script is running inside the packaged app " +
+            "'{0}'. Windows redirects its writes to {1} into the package, " +
+            "so other terminals will not see this install. Run it from an " +
+            "ordinary terminal, or pass -InstallDir with a directory outside " +
+            "%LOCALAPPDATA% that is already on PATH (for example " +
+            "%USERPROFILE%\.local\bin) and -NoPathUpdate.") -f $package,
+            ($redirected -join ' and '))
+    }
+}
+
 function Get-NormalizedPath {
     param([string]$Path)
 

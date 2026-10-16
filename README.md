@@ -99,6 +99,12 @@ Ninja는 `--config`를 무시하므로 빌드 종류는 `-DCMAKE_BUILD_TYPE`으�
 
 이 경우 실행 중인 예전 `tmux.exe`는 옆으로 옮겨 두고 새 파일을 설치합니다.
 
+설치 스크립트는 일반 터미널에서 실행하세요. Claude 데스크톱 앱 같은 패키지(MSIX) 앱이나 그 안의 에이전트가 실행하면 `%LOCALAPPDATA%`와 사용자 레지스트리 쓰기가 `%LOCALAPPDATA%\Packages\<앱>\LocalCache`로 리디렉트되어, 설치와 PATH 변경이 다른 터미널에서는 보이지 않습니다. 스크립트가 이를 감지해 경고하며, 그런 환경에서는 이미 PATH에 있는 `%LOCALAPPDATA%` 밖의 디렉터리에 설치하세요.
+
+```powershell
+.\install-user.ps1 -InstallDir "$env:USERPROFILE\.local\bin" -NoPathUpdate
+```
+
 IPC 보안 강화 이전 버전에서 업그레이드할 때: 예전 `tmux.exe`가 띄운 서버는 새 클라이언트가 접속을 거부하며 (`server ... grants access to other users; refusing to connect`), 새 `tmux kill-server`로도 끌 수 없습니다. 그 예전 서버를 작업 관리자나 `Stop-Process`로 한 번 종료해야 합니다 (그 세션은 사라집니다). `install-user.ps1`은 `-KeepSessions` 없이 실행하면 교체되는 `tmux.exe`의 서버를 예전 바이너리로 종료합니다.
 
 ### 기본 사용법

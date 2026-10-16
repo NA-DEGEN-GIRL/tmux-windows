@@ -465,6 +465,18 @@ from the older binary; servers started from other copies of tmux are left
 alone. With `-KeepSessions` running servers are kept and the old
 `tmux.exe` is moved aside so the new one can be installed.
 
+Run the installer from an ordinary terminal. Programs started by a packaged
+(MSIX) app, such as the Claude desktop app or an agent running inside it,
+can have their writes to `%LOCALAPPDATA%` and the user registry redirected
+into `%LOCALAPPDATA%\Packages\<app>\LocalCache`, so the install and the PATH
+change are invisible everywhere else. The script detects this and warns;
+from such an app install into a directory outside `%LOCALAPPDATA%` that is
+already on `PATH` instead:
+
+```powershell
+.\install-user.ps1 -InstallDir "$env:USERPROFILE\.local\bin" -NoPathUpdate
+```
+
 ### Release zip
 
 If this repository publishes a release artifact:
