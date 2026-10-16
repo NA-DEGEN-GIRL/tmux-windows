@@ -91,6 +91,24 @@ V=$(t show -sv exit-empty </dev/null | tr -d '\r')
 [ "$V" = "on" ] && pass "started server exits when empty" ||
     fail "started server exit-empty is '$V'"
 t kill-server </dev/null
+
+# 1b. Arguments that are not ASCII arrive intact, although the C runtime gives
+# main() its arguments in the ANSI code page: a -f file in a Korean directory
+# for a new server, and a Korean option value from a client.
+mkdir -p "$DIR/설정 폴더"
+printf 'set -g @ipc_ko applied\n' >"$DIR/설정 폴더/ko.conf"
+timeout 30 $TMUX -f "$WDIR\\설정 폴더\\ko.conf" new -d -s ipc </dev/null ||
+    fail "new-session with a non-ASCII -f path"
+V=$(t show -gv @ipc_ko </dev/null 2>&1 | tr -d '\r')
+[ "$V" = applied ] && pass "non-ASCII -f path for a new server" ||
+    fail "non-ASCII -f path: got '$V'"
+t set -g @ipc_arg '한글값' </dev/null
+V=$(t show -gv @ipc_arg </dev/null | tr -d '\r' | od -An -tx1 | tr -d ' \n')
+E=$(printf '한글값\n' | od -An -tx1 | tr -d ' \n')
+[ "$V" = "$E" ] && pass "non-ASCII argument" ||
+    fail "non-ASCII argument: got $V, expected $E"
+t kill-server </dev/null
+
 t -fNUL new -d -s ipc </dev/null || fail "new-session"
 
 # 2. A connection that never authenticates (or sends rubbish) does not block

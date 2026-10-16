@@ -23,6 +23,7 @@
 #endif
 
 #ifdef _WIN32
+#include <corecrt_startup.h>
 #include <crtdbg.h>
 #endif
 #include <errno.h>
@@ -223,6 +224,59 @@ expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 }
 
 #ifdef _WIN32
+/*
+ * The CRT builds argv in the ANSI code page, which cannot hold every
+ * character and differs from the UTF-8 that tmux uses everywhere else (so a
+ * non-ASCII -f path, socket name or command argument would be garbled).
+ * Rebuild it in UTF-8 from the UTF-16 command line, parsed by the CRT the
+ * same way.
+ */
+static char **
+win32_utf8_argv(int argc, char **argv)
+{
+	wchar_t	**wargv;
+	char	**uargv;
+	int	  i;
+
+	if (_configure_wide_argv(_crt_argv_unexpanded_arguments) != 0 ||
+	    (wargv = __wargv) == NULL)
+		return (argv);
+	for (i = 0; i < argc; i++) {
+		if (wargv[i] == NULL)
+			return (argv);
+	}
+	if (wargv[argc] != NULL)
+		return (argv);
+
+	uargv = xcalloc(argc + 1, sizeof *uargv);
+	for (i = 0; i < argc; i++) {
+		if ((uargv[i] = win32_ipc_wide_to_utf8(wargv[i])) == NULL)
+			uargv[i] = xstrdup(argv[i]);
+	}
+	uargv[argc] = NULL;
+	return (uargv);
+}
+
+/* Get an environment variable in UTF-8 (the CRT's copy is ANSI). */
+static char *
+win32_getenv_utf8(const wchar_t *name)
+{
+	wchar_t	*w;
+	DWORD	 n;
+	char	*s;
+
+	if ((n = GetEnvironmentVariableW(name, NULL, 0)) == 0)
+		return (NULL);
+	w = xreallocarray(NULL, n, sizeof *w);
+	if (GetEnvironmentVariableW(name, w, n) != n - 1) {
+		free(w);
+		return (NULL);
+	}
+	s = win32_ipc_wide_to_utf8(w);
+	free(w);
+	return (s);
+}
+
 /* Get the user name in UTF-8. */
 static char *
 win32_user_name(void)
@@ -545,6 +599,8 @@ main(int argc, char **argv)
 	_CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
 	_CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
 
+	argv = win32_utf8_argv(argc, argv);
+
 	/*
 	 * A server started by a client is marked in its environment; take the
 	 * marker out so it is not inherited by anything the server runs.
@@ -776,6 +832,17 @@ main(int argc, char **argv)
 	 * used. Otherwise, $TMUX is checked and if that fails "default" is
 	 * used.
 	 */
+#ifdef _WIN32
+	if (path == NULL && label == NULL) {
+		path = win32_getenv_utf8(L"TMUX");
+		if (path != NULL && (*path == '\0' || *path == ',')) {
+			free(path);
+			path = NULL;
+		}
+		if (path != NULL)
+			path[strcspn(path, ",")] = '\0';
+	}
+#else
 	if (path == NULL && label == NULL) {
 		s = getenv("TMUX");
 		if (s != NULL && *s != '\0' && *s != ',') {
@@ -783,6 +850,7 @@ main(int argc, char **argv)
 			path[strcspn(path, ",")] = '\0';
 		}
 	}
+#endif
 #ifdef _WIN32
 	if (path != NULL) {
 		s = path;
