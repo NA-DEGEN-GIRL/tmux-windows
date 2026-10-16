@@ -219,6 +219,23 @@ else
 	fail "control mode: exit $R, $(head -5 $DIR/ctl.out)"
 fi
 
+# 7b. Control mode commands ending in CRLF, as PowerShell and other Windows
+# programs write them to a pipe, also when the CR and LF arrive separately.
+timeout 10 $IN set -g @ctl_crlf crlf-value </dev/null
+{
+	printf 'display -p crlf-marker\r\nshow -gv @ctl_crlf\r\n'
+	printf 'display -p split-marker\r'
+	sleep 1
+	printf '\n'
+} | timeout 20 $IN -C attach -t s >$DIR/ctl.out 2>&1
+if grep -qx 'crlf-marker' $DIR/ctl.out && grep -qx 'crlf-value' $DIR/ctl.out &&
+    grep -qx 'split-marker' $DIR/ctl.out && ! grep -q '%error' $DIR/ctl.out
+then
+	pass "control mode commands ending in CRLF"
+else
+	fail "control mode with CRLF: $(od -c $DIR/ctl.out | head -8)"
+fi
+
 # 8. Control mode from a console.
 outer o5 "$WTMUX -L$LABEL-in -C attach -t s"
 until_ok outer_has o5 '^%' >/dev/null

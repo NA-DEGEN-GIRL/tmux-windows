@@ -1034,49 +1034,68 @@ client_stdin_thread_func(LPVOID arg)
 {
 	SOCKET	 s = (SOCKET)(intptr_t)arg;
 	HANDLE	 h = GetStdHandle(STD_INPUT_HANDLE);
-	char	 buf[8192], *in, *out;
+	char	 buf[8193], *in, *out;
 	DWORD	 nread, mode, error;
-	int	 console, control, eof = 0;
+	int	 console, ispipe, control, eof = 0, cr = 0;
 
 	console = GetConsoleMode(h, &mode);
+	ispipe = !console && GetFileType(h) == FILE_TYPE_PIPE;
 	control = (client_flags & CLIENT_CONTROL) != 0;
 
 	while (client_tty_running) {
 		if (console && client_console_wait(h) != 0)
 			break;
-		if (!ReadFile(h, buf, sizeof buf, &nread, NULL)) {
+		if (!ReadFile(h, buf + 1, sizeof buf - 1, &nread, NULL)) {
 			error = GetLastError();
 			if (error == ERROR_OPERATION_ABORTED &&
 			    client_tty_running && console)
 				continue; /* Ctrl-C in a cooked console */
-			eof = (error == ERROR_BROKEN_PIPE ||
-			    error == ERROR_HANDLE_EOF);
+			/* End of a pipe or a bad handle: no more input. */
+			eof = client_tty_running;
 			break;
 		}
 		if (nread == 0) {
-			if (console && !control)
+			/* A pipe can carry empty writes. */
+			if (ispipe || (console && !control))
 				continue;
-			eof = 1; /* Ctrl-Z in a console or end of a pipe */
+			eof = 1; /* Ctrl-Z in a console or end of a file */
 			break;
 		}
 
-		/* Control mode reads lines: a console ends them with CRLF. */
-		if (control && console) {
-			for (in = out = buf; in < buf + nread; in++) {
-				if (in[0] == '\r' && in + 1 < buf + nread &&
-				    in[1] == '\n')
+		/*
+		 * Control mode reads lines ending in LF. Windows programs
+		 * (a console, PowerShell writing to a pipe) end them with CRLF,
+		 * so drop a CR before LF, also when the two arrive in separate
+		 * reads: a CR at the end of a read is held back until the
+		 * next.
+		 */
+		in = buf + 1;
+		if (control) {
+			if (cr) {
+				*--in = '\r';
+				nread++;
+			}
+			cr = (in[nread - 1] == '\r');
+			if (cr)
+				nread--;
+			for (out = buf; nread > 0; in++, nread--) {
+				if (in[0] == '\r' && nread > 1 && in[1] == '\n')
 					continue;
 				*out++ = *in;
 			}
+			in = buf;
 			nread = (DWORD)(out - buf);
 		}
-		if (client_tty_send(s, buf, nread) != 0)
+		if (nread != 0 && client_tty_send(s, in, nread) != 0)
 			break;
 	}
 
 	/* No more input: tell the server, as closing stdin does on Unix. */
-	if (eof && control)
+	if (eof && control) {
+		if (cr)
+			client_tty_send(s, "\r", 1);
 		shutdown(s, SD_SEND);
+	}
 	return (0);
 }
 
