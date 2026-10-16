@@ -504,6 +504,7 @@ if(BUILD_TESTING)
         regress/win32-kill.c
         win32/win32-process.c
         win32/win32-compat.c
+        win32/win32-unicode.c
         xmalloc.c
         compat/asprintf.c
         compat/reallocarray.c
