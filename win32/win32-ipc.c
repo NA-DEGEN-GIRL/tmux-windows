@@ -46,12 +46,12 @@ BOOLEAN NTAPI RtlGenRandom(PVOID, ULONG);
 #define IPC_TOKEN_BYTES		32
 #define IPC_TOKEN_LEN		(IPC_TOKEN_BYTES * 2)
 #define IPC_MAX_NONCES		256
-#define IPC_NONCE_EXPIRY	30000	/* milliseconds */
+#define IPC_NONCE_EXPIRY	60000	/* milliseconds */
 #define IPC_PIPE_INSTANCES	4
 #define IPC_PIPE_TIMEOUT	5000	/* milliseconds */
 #define IPC_PIPE_RETRY		1000	/* milliseconds */
 #define IPC_CONNECT_TIMEOUT	10000	/* milliseconds */
-#define IPC_REPLY_TIMEOUT	5000	/* milliseconds */
+#define IPC_REPLY_TIMEOUT	30000	/* milliseconds */
 #define IPC_LINE_MAX		192
 #define IPC_LOCK_TIMEOUT	15000	/* milliseconds */
 
@@ -1080,7 +1080,10 @@ ipc_send_all(SOCKET s, const char *buf, size_t len)
 	return (0);
 }
 
-/* Read the server's proof line from a blocking socket with a deadline. */
+/*
+ * Read the server's proof line from a blocking socket with a deadline.
+ * Returns 0, -1 on error or end of file, or -2 if the deadline passed.
+ */
 static int
 ipc_recv_line(SOCKET s, char *buf, size_t size, ULONGLONG deadline)
 {
@@ -1089,16 +1092,19 @@ ipc_recv_line(SOCKET s, char *buf, size_t size, ULONGLONG deadline)
 	ULONGLONG	 now;
 	size_t		 len = 0;
 	char		 ch;
+	int		 n;
 
 	while (len < size - 1) {
 		now = GetTickCount64();
 		if (now >= deadline)
-			return (-1);
+			return (-2);
 		tv.tv_sec = (long)((deadline - now) / 1000);
 		tv.tv_usec = (long)(((deadline - now) % 1000) * 1000);
 		FD_ZERO(&set);
 		FD_SET(s, &set);
-		if (select(0, &set, NULL, NULL, &tv) != 1)
+		if ((n = select(0, &set, NULL, NULL, &tv)) == 0)
+			return (-2);
+		if (n != 1)
 			return (-1);
 		if (recv(s, &ch, 1, 0) != 1)
 			return (-1);
@@ -1125,7 +1131,7 @@ win32_ipc_connect(const char *label, const char *tty_token, int *status,
 	HANDLE			 pipe;
 	ULONGLONG		 deadline, now;
 	DWORD			 error, wait;
-	int			 sent;
+	int			 sent, got;
 	char			 line[IPC_LINE_MAX], reply[IPC_LINE_MAX];
 	char			*nonce, *proof, *end, *msg, *auth;
 	u_long			 port;
@@ -1235,9 +1241,19 @@ win32_ipc_connect(const char *label, const char *tty_token, int *status,
 		goto socket_failed;
 
 	if (proof != NULL) {
+		/*
+		 * A busy server (spawning many panes on a loaded machine) can
+		 * take seconds to get to a new connection, so allow plenty of
+		 * time; the nonce lasts longer still.
+		 */
 		deadline = GetTickCount64() + IPC_REPLY_TIMEOUT;
-		if (ipc_recv_line(s, reply, sizeof reply, deadline) != 0 ||
-		    !ipc_valid_token(reply) || !ipc_token_equal(reply, proof)) {
+		got = ipc_recv_line(s, reply, sizeof reply, deadline);
+		if (got == -2) {
+			xasprintf(cause, "server %s is not responding", label);
+			goto fail;
+		}
+		if (got != 0 || !ipc_valid_token(reply) ||
+		    !ipc_token_equal(reply, proof)) {
 			xasprintf(cause, "server %s failed to authenticate; "
 			    "refusing to connect", label);
 			goto fail;

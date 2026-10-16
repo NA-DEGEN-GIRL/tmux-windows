@@ -548,6 +548,52 @@ EOF2
 	fi
 fi
 
+# 12. A server that is busy for several seconds (here: its main thread is
+# held, as when it is spawning many panes on a loaded machine) is waited for
+# rather than reported as failing to authenticate.
+cat >$DIR/stall.ps1 <<'EOF'
+param([int]$Server, [int]$Ms, [string]$Ready)
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class Stall {
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern IntPtr OpenThread(uint access, bool inherit, uint id);
+    [DllImport("kernel32.dll")]
+    public static extern int SuspendThread(IntPtr h);
+    [DllImport("kernel32.dll")]
+    public static extern int ResumeThread(IntPtr h);
+}
+'@
+$main = (Get-Process -Id $Server).Threads | Sort-Object StartTime, Id |
+    Select-Object -First 1
+$h = [Stall]::OpenThread(0x0002, $false, $main.Id)
+if ([Stall]::SuspendThread($h) -lt 0) { exit 1 }
+Set-Content -Path $Ready -Value held
+Start-Sleep -Milliseconds $Ms
+[Stall]::ResumeThread($h) | Out-Null
+EOF
+t -fNUL new -d -s busy </dev/null
+PID=$(t display -p '#{pid}' </dev/null | tr -d '\r')
+rm -f $DIR/stalled
+"$POWERSHELL" -NoProfile -ExecutionPolicy Bypass -File "$WDIR\\stall.ps1" \
+    -Server $PID -Ms 8000 -Ready "$WDIR\\stalled" >/dev/null 2>&1 &
+STALL=$!
+if wait_file $DIR/stalled; then
+	S=$(date +%s)
+	timeout 30 $TMUX has-session -t busy </dev/null >$DIR/out 2>&1
+	R=$?
+	E=$(($(date +%s) - S))
+	if [ $R -eq 0 ] && [ $E -ge 5 ]; then
+		pass "a busy server is waited for ($E s)"
+	else
+		fail "busy server: exit $R after $E s: $(cat $DIR/out)"
+	fi
+else
+	fail "could not hold the server's main thread"
+fi
+wait $STALL 2>/dev/null
+
 for l in $LABEL $L2 $L3 $LD $LQ; do
 	$TEST_TMUX -L$l kill-server 2>/dev/null
 done
