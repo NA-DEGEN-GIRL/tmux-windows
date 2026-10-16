@@ -38,7 +38,13 @@ tmux kill-session -t work
 - vertical/horizontal split
 - `send-keys`, `capture-pane`, `list-panes`
 - 기본 mouse/key binding 파싱
-- `%USERPROFILE%\.tmux.conf` 설정 파일
+- `%USERPROFILE%\.tmux.conf` 설정 파일 (LF/CRLF, UTF-8 BOM 모두 가능)
+- `run-shell`, `if-shell`, `#()`, `pipe-pane`, `copy-pipe`, popup 실행 (서버가 죽지 않음)
+- `default-shell`로 cmd.exe, Git Bash, `pwsh.exe` 사용 (Windows 전체 경로로 지정)
+- 한글 등 UTF-8: session/window 이름, option 값, `send-keys`, 경로, job 출력
+- `#{pane_current_command}`, `#{pane_current_path}`, `automatic-rename`
+- 셸에서 `source-file`, `load-buffer`/`save-buffer` (파일과 `-`) 사용, 출력은 LF (CRLF 아님)
+- control mode (`tmux -C`), `kill-pane` 시 하위 프로세스 트리 전체 종료
 
 ### 요구 사항
 
@@ -76,12 +82,12 @@ Ninja는 `--config`를 무시하므로 빌드 종류는 `-DCMAKE_BUILD_TYPE`으�
 ```powershell
 .\install-user.ps1 -Build    # Release 빌드 후 설치
 .\install-user.ps1           # 이미 있는 build\release\tmux.exe 설치
-.\install-user.ps1 -DryRun   # 실제로 바꾸지 않고 할 일만 표시
+.\install-user.ps1 -DryRun   # 실제로 바꾸지 않고 할 일만 표시 (-WhatIf와 같음)
 ```
 
 이 스크립트는 다음을 수행합니다.
 
-- `build\release\tmux.exe`를 `%LOCALAPPDATA%\tmux-windows\bin\tmux.exe`로 복사 (`-InstallDir`로 변경 가능)
+- `build\release\tmux.exe`(`-BuildExe`로 변경 가능)를 `%LOCALAPPDATA%\tmux-windows\bin\tmux.exe`로 복사 (`-InstallDir`로 변경 가능)
 - 해당 디렉터리를 User PATH에 추가 (레지스트리 값의 `%VAR%` 항목과 형식은 그대로 유지, `-NoPathUpdate`로 생략 가능)
 - 교체되는 `tmux.exe`로 실행 중인 서버를 모든 `-L` label에 대해 먼저 종료 (다른 tmux.exe로 실행한 서버는 건드리지 않음)
 
@@ -92,6 +98,8 @@ Ninja는 `--config`를 무시하므로 빌드 종류는 `-DCMAKE_BUILD_TYPE`으�
 ```
 
 이 경우 실행 중인 예전 `tmux.exe`는 옆으로 옮겨 두고 새 파일을 설치합니다.
+
+IPC 보안 강화 이전 버전에서 업그레이드할 때: 예전 `tmux.exe`가 띄운 서버는 새 클라이언트가 접속을 거부하며 (`server ... grants access to other users; refusing to connect`), 새 `tmux kill-server`로도 끌 수 없습니다. 그 예전 서버를 작업 관리자나 `Stop-Process`로 한 번 종료해야 합니다 (그 세션은 사라집니다). `install-user.ps1`은 `-KeepSessions` 없이 실행하면 교체되는 `tmux.exe`의 서버를 예전 바이너리로 종료합니다.
 
 ### 기본 사용법
 
@@ -146,8 +154,10 @@ tmux source-file $env:USERPROFILE\.tmux.conf
 
 - 아직 실험적인 포트입니다.
 - 모든 upstream tmux 기능과 plugin 호환성을 보장하지 않습니다.
-- clipboard 동작은 Windows Terminal/ConPTY/OSC 52 지원 상태에 영향을 받을 수 있습니다.
-- package manager 배포, control mode 완전 호환, 고급 copy-mode/mouse 동작은 계속 검증이 필요합니다.
+- clipboard는 OSC 52로 터미널에 보내므로 터미널의 OSC 52 지원 여부에 따라 달라집니다.
+- job control이 없어 `suspend-client`는 화면만 다시 그립니다. `-CC`는 검증되지 않았습니다.
+- `#{pane_current_command}`/`#{pane_current_path}`는 근사치입니다. PowerShell에서 `cd`를 따라가게 하려면 [README_WIN32.MD](README_WIN32.MD)의 프로필 설정(PowerShell 7.2+)이 필요합니다.
+- package manager 배포, 고급 copy-mode/mouse 동작은 계속 검증이 필요합니다.
 
 자세한 Windows 포트 구조와 테스트 목록은 [README_WIN32.MD](README_WIN32.MD)를 보세요.
 
@@ -182,7 +192,13 @@ Currently verified:
 - horizontal and vertical splits
 - `send-keys`, `capture-pane`, `list-panes`
 - default mouse/key binding parsing
-- `%USERPROFILE%\.tmux.conf`
+- `%USERPROFILE%\.tmux.conf` (LF or CRLF, with or without a UTF-8 BOM)
+- jobs: `run-shell`, `if-shell`, `#()`, `pipe-pane`, `copy-pipe` and popups, without crashing the server
+- `default-shell` set to cmd.exe, Git Bash or `pwsh.exe` (as a full Windows path)
+- Korean and other UTF-8 text in names, option values, `send-keys`, paths and job output
+- `#{pane_current_command}`, `#{pane_current_path}` and `automatic-rename`
+- `source-file`, `load-buffer`/`save-buffer` (files and `-`) from a shell, with LF (not CRLF) output
+- control mode (`tmux -C`), and `kill-pane` ending the pane's whole process tree
 
 ### Requirements
 
@@ -220,12 +236,12 @@ Ninja ignores `--config`; the build type comes from `-DCMAKE_BUILD_TYPE`.
 ```powershell
 .\install-user.ps1 -Build    # build Release, then install
 .\install-user.ps1           # install an existing build\release\tmux.exe
-.\install-user.ps1 -DryRun   # show what would be done
+.\install-user.ps1 -DryRun   # show what would be done (same as -WhatIf)
 ```
 
 The installer:
 
-- copies `build\release\tmux.exe` to `%LOCALAPPDATA%\tmux-windows\bin\tmux.exe` (`-InstallDir` to change)
+- copies `build\release\tmux.exe` (`-BuildExe` to choose another) to `%LOCALAPPDATA%\tmux-windows\bin\tmux.exe` (`-InstallDir` to change)
 - adds that directory to the User PATH, keeping existing `%VAR%` entries and the value type (`-NoPathUpdate` to skip)
 - stops the servers running from the `tmux.exe` it replaces, whatever their `-L` label, so new clients do not attach to a server from an older binary; servers from other tmux copies are left alone
 
@@ -234,6 +250,13 @@ Use `-KeepSessions` only when you intentionally want to keep existing sessions; 
 ```powershell
 .\install-user.ps1 -KeepSessions
 ```
+
+Upgrading from a build before the IPC hardening: a server started by the
+older `tmux.exe` is refused by the new client (`server ... grants access to
+other users; refusing to connect`) and the new `tmux kill-server` cannot
+reach it. End that old server once with Task Manager or `Stop-Process` (its
+sessions are lost). Without `-KeepSessions`, `install-user.ps1` stops the
+servers of the `tmux.exe` it replaces using that old binary.
 
 ### Basic Usage
 
@@ -288,8 +311,10 @@ tmux source-file $env:USERPROFILE\.tmux.conf
 
 - This is still an experimental Windows-native port.
 - Full upstream tmux parity is not guaranteed yet.
-- Clipboard behavior depends on terminal support for the relevant escape sequences.
-- Package manager distribution, full control mode compatibility, and advanced plugin compatibility are post-MVP work.
+- The clipboard is set through OSC 52, so it depends on the terminal supporting it.
+- There is no job control: `suspend-client` only redraws. `-CC` is untested.
+- `#{pane_current_command}` and `#{pane_current_path}` are approximations; in PowerShell, `pane_current_path` follows `cd` only with the profile snippet in [README_WIN32.MD](README_WIN32.MD) (PowerShell 7.2+).
+- Package manager distribution and advanced plugin compatibility are post-MVP work.
 
 For the implementation details, Windows architecture notes, and regression tests, see [README_WIN32.MD](README_WIN32.MD).
 

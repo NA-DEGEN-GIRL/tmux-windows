@@ -91,21 +91,27 @@ tmux -Ltest kill-server
 tmux -vv -Ltest -fNUL new
 ~~~
 
-- Check if the issue reproduces with the Windows regression tests:
+- Check if the issue reproduces with the Windows regression tests (Debug
+  build in `build\win32`, see README_WIN32.MD). Each script uses its own
+  server label, so this does not touch your own sessions:
 
 ~~~powershell
-ctest --test-dir build -C Debug --output-on-failure
+ctest --test-dir build\win32 -LE regress --output-on-failure
 ~~~
 
 ~~~bash
-TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-basic.sh
+TEST_TMUX=./build/win32/tmux.exe sh regress/win32-run-all.sh
+TEST_TMUX=./build/win32/tmux.exe sh regress/win32-run-all.sh basic
 ~~~
 
-  CI runs one native C test plus the full shell suite in
-  `regress/win32-*.sh` (8 scripts, 230+ assertions).
+  CI runs the native unit tests labelled `unit` plus every
+  `regress/win32-*.sh` script (through `regress/win32-run-all.sh`) against
+  the Debug and the Release build.
 
 - For IPC or connectivity issues, include the server log
   (`tmux-server-*.log`) — it shows pipe creation, nonce auth, and TCP setup.
+  If an automatically started server fails, also include
+  `%LOCALAPPDATA%\tmux\<server name>.server.log`.
 
 ## What does it mean if an issue is closed?
 
