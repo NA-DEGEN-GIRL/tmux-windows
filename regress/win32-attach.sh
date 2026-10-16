@@ -65,6 +65,9 @@ outer_has() {
 outer_fmt() {
 	timeout 10 $OUT display -p -t "$1" "$2" </dev/null | tr -d '\r'
 }
+outer_is() {
+	[ "$(outer_fmt "$1" "$2")" = "$3" ]
+}
 windows() {
 	[ "$(timeout 10 $IN display -p -t s '#{session_windows}' </dev/null |
 	    tr -d '\r')" = "$1" ]
@@ -141,7 +144,7 @@ timeout 10 $IN set -g mouse on </dev/null
 outer o3 "$SYS\\chcp.com 437 >nul & $ATTACH & $SYS\\chcp.com & $SYS\\PING.EXE -n 60 127.0.0.1 >nul"
 until_ok nclients 2
 C3=$(clients | grep -v "^$C\$")
-until_ok test "$(outer_fmt o3 '#{alternate_on}#{mouse_any_flag}')" = 11
+until_ok outer_is o3 '#{alternate_on}#{mouse_any_flag}' 11
 timeout 10 $IN detach-client -t "$C3" </dev/null
 if until_ok outer_has o3 ': *437'; then
 	V=$(outer_fmt o3 '#{alternate_on}#{mouse_any_flag}')
@@ -162,10 +165,35 @@ outer o4 "$ATTACH & echo shell-still-alive & $SYS\\PING.EXE -n 60 127.0.0.1 >nul
 until_ok nclients 2
 C4=$(clients | grep -v "^$C\$")
 timeout 10 $IN detach-client -P -t "$C4" </dev/null
-if until_ok test "$(outer_fmt o4 '#{pane_dead}')" = 1; then
+if until_ok outer_is o4 '#{pane_dead}' 1; then
 	pass "detach-client -P ends the parent shell"
 else
 	fail "parent shell survived detach-client -P"
+fi
+
+# 5b. ... but never a parent that is not on the client's console: here the
+# client is run directly (argv form) by the outer server, which hosts its
+# console and must survive.
+env -u SHELL timeout 20 $OUT -f "$WDIR\\outer.conf" new -d -s o6 -x 120 \
+    -y 40 -e TMUX= -- "$WTMUX" -L$LABEL-in attach -t s </dev/null
+OUTER_PID=$(outer_fmt o6 '#{pid}')
+until_ok nclients 2
+C6=$(clients | grep -v "^$C\$")
+PANE_PID=$(outer_fmt o6 '#{pane_pid}')
+C6_PID=$(timeout 10 $IN display -p -c "$C6" '#{client_pid}' </dev/null |
+    tr -d '\r')
+timeout 10 $IN detach-client -P -t "$C6" </dev/null
+if [ -z "$C6_PID" ] || [ "$C6_PID" != "$PANE_PID" ]; then
+	fail "client $C6_PID is not the pane process $PANE_PID"
+elif until_ok nclients 1 &&
+    until_ok outer_is o6 '#{pane_dead}' 1 &&
+    timeout 10 $OUT has-session -t o1 </dev/null &&
+    [ "$(outer_fmt o1 '#{pid}')" = "$OUTER_PID" ]; then
+	pass "detach-client -P spares a parent off the console"
+else
+	fail "detach-client -P with the server as parent: clients\
+ '$(clients | tr '\n' ' ')', outer\
+ $(timeout 10 $OUT list-sessions </dev/null 2>&1 | head -1)"
 fi
 
 # 6. Attaching from inside one of the server's own panes is refused.

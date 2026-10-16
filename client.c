@@ -1207,10 +1207,39 @@ client_send_resize(void)
 	proc_send(client_peer, MSG_RESIZE, -1, &rd, sizeof rd);
 }
 
+/* Is a process attached to the same console as the client? */
+static int
+client_shares_console(DWORD pid)
+{
+	DWORD	*list, n, size = 64, i;
+	int	 found = 0;
+
+	for (;;) {
+		list = xreallocarray(NULL, size, sizeof *list);
+		n = GetConsoleProcessList(list, size);
+		if (n <= size)
+			break;
+		free(list);
+		size = n + 16;
+	}
+	for (i = 0; i < n; i++) {
+		if (list[i] == pid) {
+			found = 1;
+			break;
+		}
+	}
+	free(list);
+	return (found);
+}
+
 /*
  * Like SIGHUP to the parent on Unix (detach-client -P): end the process that
- * started the client, normally the shell. The process is checked to still be
- * our parent (created before us) so a reused process ID is never hit.
+ * started the client, normally the shell. Only a parent on the client's own
+ * console is ended: a SIGHUP can be caught or ignored but TerminateProcess
+ * cannot, and a parent that hosts the console rather than runs in it (such as
+ * Windows Terminal, or a tmux server running the client in a pane) has other
+ * windows and sessions to lose. The process is also checked to still be our
+ * parent (created before us) so a reused process ID is never hit.
  */
 static void
 client_kill_parent(pid_t ppid)
@@ -1218,6 +1247,10 @@ client_kill_parent(pid_t ppid)
 	HANDLE		h;
 	FILETIME	pc, sc, x1, x2, x3;
 
+	if (!client_shares_console((DWORD)ppid)) {
+		log_debug("parent %ld is not on our console", (long)ppid);
+		return;
+	}
 	h = OpenProcess(PROCESS_TERMINATE|PROCESS_QUERY_LIMITED_INFORMATION,
 	    FALSE, (DWORD)ppid);
 	if (h == NULL)
