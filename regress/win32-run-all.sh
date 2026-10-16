@@ -22,6 +22,13 @@ if [ ! -f "$TEST_TMUX" ] && [ ! -f "$TEST_TMUX.exe" ]; then
 fi
 export TEST_TMUX
 
+# Run panes with Git Bash as a user starting tmux from Git Bash would: an
+# interactive Git Bash exports SHELL, a CI step does not.
+if ! env | grep -q "^SHELL="; then
+	SHELL=/bin/bash.exe
+	export SHELL
+fi
+
 PREFIX=${TMUX_TEST_PREFIX:-run}
 LIMIT=${TMUX_TEST_TIMEOUT:-600}
 

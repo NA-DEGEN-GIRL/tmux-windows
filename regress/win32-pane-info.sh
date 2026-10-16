@@ -78,10 +78,12 @@ never_changes() {
 BASH_W=$(cygpath -w /usr/bin/bash.exe)
 DIR="$OUT/dir with space 한글"
 mkdir -p "$DIR"
-DIR_W=$(cygpath -w "$DIR")
+# Long names: CI runners have an 8.3 short %TEMP% (RUNNER~1) and tmux
+# reports the long form.
+DIR_W=$(cygpath -w -l "$DIR")
 DIR2="$OUT/background 작업"
 mkdir -p "$DIR2"
-DIR2_W=$(cygpath -w "$DIR2")
+DIR2_W=$(cygpath -w -l "$DIR2")
 
 $TMUX -fNUL new -d -s info -x 120 -y 30 -- "$BASH_W" -l </dev/null || exit 1
 $TMUX set -g remain-on-exit on
