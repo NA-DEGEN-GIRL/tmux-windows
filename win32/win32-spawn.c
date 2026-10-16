@@ -742,6 +742,31 @@ win32_quote_batch(struct wbuf *b, const wchar_t *arg)
  * it would otherwise have had, and its exit status is the one returned.
  * Returns 1 if it did.
  */
+/*
+ * The OEM code page new consoles get. GetOEMCP() cannot be used: the UTF-8
+ * code page in tmux's manifest applies to tmux itself, not to its children.
+ */
+static UINT
+win32_system_oemcp(void)
+{
+	HKEY	 key;
+	wchar_t	 value[16];
+	DWORD	 size = sizeof value, type;
+	UINT	 cp = 0;
+
+	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+	    L"SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage", 0,
+	    KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
+		return (GetOEMCP());
+	if (RegQueryValueExW(key, L"OEMCP", NULL, &type, (BYTE *)value,
+	    &size) == ERROR_SUCCESS && type == REG_SZ && size < sizeof value) {
+		value[size / sizeof value[0]] = L'\0';
+		cp = (UINT)wcstoul(value, NULL, 10);
+	}
+	RegCloseKey(key);
+	return (cp != 0 ? cp : GetOEMCP());
+}
+
 static int
 win32_cmdline_utf8(struct win32_spawn *sp, struct wbuf *b)
 {
@@ -749,7 +774,7 @@ win32_cmdline_utf8(struct win32_spawn *sp, struct wbuf *b)
 	UINT	n;
 	int	found;
 
-	if (~sp->flags & WIN32_SPAWN_UTF8 || GetOEMCP() == CP_UTF8)
+	if (~sp->flags & WIN32_SPAWN_UTF8 || win32_system_oemcp() == CP_UTF8)
 		return (0);
 	n = GetSystemDirectoryW(sysdir, nitems(sysdir));
 	if (n == 0 || n >= nitems(sysdir))
