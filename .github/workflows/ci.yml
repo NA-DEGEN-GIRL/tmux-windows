@@ -32,11 +32,8 @@ jobs:
           key: vcpkg-x64-windows-static-${{ hashFiles('vcpkg.json', 'CMakeLists.txt') }}
           restore-keys: vcpkg-x64-windows-static-
 
-      - name: Setup vcpkg and install dependencies
-        shell: pwsh
-        run: |
-          vcpkg install libevent:x64-windows-static
-
+      # vcpkg.json puts vcpkg in manifest mode: the toolchain installs the
+      # dependencies during configure ("vcpkg install <pkg>" is an error).
       - name: Configure CMake
         shell: pwsh
         run: |
