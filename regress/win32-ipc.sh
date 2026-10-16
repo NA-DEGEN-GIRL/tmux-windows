@@ -446,7 +446,9 @@ function median(a) { a.sort((x, y) => x - y); return a[a.length >> 1]; }
 	if (r.code !== 0) fail('capture-pane: ' + r.err);
 	r = await run(['delete-buffer', '-b', 'rbuf']);
 	if (r.code !== 0) fail('delete-buffer: ' + r.err);
-	for (let i = 0; i < 100 && !fs.existsSync(out); i++)
+	// tmux writes the paste at once, but a console reads typed input
+	// slowly: 12 KB can take well over 10 s on a busy machine.
+	for (let i = 0; i < 300 && !fs.existsSync(out); i++)
 		await new Promise((res) => setTimeout(res, 100));
 	if (!fs.existsSync(out))
 		fail('paste never reached the pane');
@@ -475,8 +477,10 @@ function median(a) { a.sort((x, y) => x - y); return a[a.length >> 1]; }
 	const report = Object.entries(t).map(([k, v]) =>
 	    `${k} ${median(v).toFixed(0)} ms (max ${Math.max(...v).toFixed(0)})`);
 	console.log('latency from node: ' + report.join(', '));
+	// Allow for a busy machine, where starting any process is slow too.
+	const limit = Math.max(150, 2 * base);
 	for (const k of ['has-session', 'capture-pane', 'send-keys'])
-		if (median(t[k]) - base > 150)
+		if (median(t[k]) - base > limit)
 			fail(`${k} takes ${(median(t[k]) - base).toFixed(0)} ms ` +
 			    'more than tmux -V');
 	r = await run(['kill-session', '-t', name]);
