@@ -780,5 +780,3 @@ win32_process_exec(const char *shell, const char *cmd)
 	CloseHandle(pi.hProcess);
 	return ((int)code);
 }
-
-}
