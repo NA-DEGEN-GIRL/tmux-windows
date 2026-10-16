@@ -23,6 +23,7 @@
 #endif
 
 #ifdef _WIN32
+#include <corecrt_startup.h>
 #include <crtdbg.h>
 #endif
 #include <errno.h>
@@ -53,6 +54,9 @@ struct timeval	 start_time;
 const char	*socket_path;
 int		 ptm_fd = -1;
 const char	*shell_command;
+#ifdef _WIN32
+int		 win32_server_autostart;
+#endif
 
 static __dead void	 usage(int);
 static char		*make_label(const char *, char **);
@@ -219,52 +223,112 @@ expand_paths(const char *s, char ***paths, u_int *n, int no_realpath)
 	free(copy);
 }
 
+#ifdef _WIN32
+
+/* Get an environment variable in UTF-8 (the CRT's copy is ANSI). */
+static char *
+win32_getenv_utf8(const wchar_t *name)
+{
+	wchar_t	*w;
+	DWORD	 n;
+	char	*s;
+
+	if ((n = GetEnvironmentVariableW(name, NULL, 0)) == 0)
+		return (NULL);
+	w = xreallocarray(NULL, n, sizeof *w);
+	if (GetEnvironmentVariableW(name, w, n) != n - 1) {
+		free(w);
+		return (NULL);
+	}
+	s = win32_ipc_wide_to_utf8(w);
+	free(w);
+	return (s);
+}
+
+/* Get the user name in UTF-8. */
+static char *
+win32_user_name(void)
+{
+	wchar_t	 name[257];
+	DWORD	 size = nitems(name);
+	char	*s;
+
+	if (GetUserNameW(name, &size) &&
+	    (s = win32_ipc_wide_to_utf8(name)) != NULL)
+		return (s);
+	return (xstrdup("user"));
+}
+
+/*
+ * Check a label is safe in a pipe name and on a command line: it may not hold
+ * quotes, backslashes, commas (used in $TMUX) or control characters.
+ */
+static int
+win32_check_label(const char *label, char **cause)
+{
+	const char	*p;
+
+	if (*label == '\0') {
+		xasprintf(cause, "empty socket name");
+		return (0);
+	}
+	if (strlen(label) > 100) {
+		xasprintf(cause, "socket name too long: %s", label);
+		return (0);
+	}
+	for (p = label; *p != '\0'; p++) {
+		if (!(*p >= 'A' && *p <= 'Z') &&
+		    !(*p >= 'a' && *p <= 'z') &&
+		    !(*p >= '0' && *p <= '9') &&
+		    *p != '.' && *p != '_' && *p != '-') {
+			if ((u_char)*p < 0x20 || (u_char)*p >= 0x7f)
+				xasprintf(cause, "bad label character 0x%02x"
+				    " (allowed: A-Z a-z 0-9 . _ -)", (u_char)*p);
+			else
+				xasprintf(cause, "bad label character '%c'"
+				    " (allowed: A-Z a-z 0-9 . _ -)", *p);
+			return (0);
+		}
+	}
+	return (1);
+}
+
+/*
+ * Turn a label into the server name, "tmux-<user>-<label>". If full is set, a
+ * name that already has this user's prefix (from $TMUX or -S
+ * "#{socket_path}") is accepted as it is.
+ */
+static char *
+win32_socket_name(const char *label, int full, char **cause)
+{
+	char	*user, *prefix, *name;
+	size_t	 len;
+
+	user = win32_user_name();
+	xasprintf(&prefix, "tmux-%s-", user);
+	free(user);
+
+	len = strlen(prefix);
+	if (full && strncmp(label, prefix, len) == 0 && label[len] != '\0')
+		label += len;
+	if (!win32_check_label(label, cause)) {
+		free(prefix);
+		return (NULL);
+	}
+	xasprintf(&name, "%s%s", prefix, label);
+	free(prefix);
+	return (name);
+}
+#endif
+
 static char *
 make_label(const char *label, char **cause)
 {
 #ifdef _WIN32
-	char		*path, *appdata;
-	char		 dir[MAX_PATH];
-
 	*cause = NULL;
 	if (label == NULL)
 		label = "default";
-
-	/* Reject labels with characters unsafe for pipe names / command lines. */
-	{
-		const char *p;
-		for (p = label; *p != '\0'; p++) {
-			if (!(*p >= 'A' && *p <= 'Z') &&
-			    !(*p >= 'a' && *p <= 'z') &&
-			    !(*p >= '0' && *p <= '9') &&
-			    *p != '.' && *p != '_' && *p != '-') {
-				xasprintf(cause, "bad label character '%c'"
-				    " (allowed: A-Z a-z 0-9 . _ -)", *p);
-				return (NULL);
-			}
-		}
-	}
-
-	appdata = getenv("LOCALAPPDATA");
-	if (appdata == NULL)
-		appdata = getenv("APPDATA");
-	if (appdata == NULL) {
-		xasprintf(cause, "no suitable socket path");
-		return (NULL);
-	}
-
-	snprintf(dir, sizeof dir, "%s\\tmux", appdata);
-	_mkdir(dir);
-
-	/* Return "tmux-<username>-<label>" as the label identifier. */
-	{
-		char username[256];
-		DWORD size = sizeof username;
-		if (!GetUserNameA(username, &size))
-			strncpy(username, "user", sizeof username);
-		xasprintf(&path, "tmux-%s-%s", username, label);
-	}
-	return (path);
+	return (win32_socket_name(label, 0, cause));
 #else
 	char		**paths, *path, *base;
 	u_int		  i, n;
@@ -503,6 +567,28 @@ main(int argc, char **argv)
 	_CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
 	_CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
 	win32_text_init(&argc, &argv, log_debug);
+
+	/*
+	 * A server started by a client is marked in its environment; take the
+	 * marker out so it is not inherited by anything the server runs.
+	 */
+	if (GetEnvironmentVariableW(L"TMUX_WIN32_AUTOSTART", NULL, 0) != 0) {
+		win32_server_autostart = 1;
+		SetEnvironmentVariableW(L"TMUX_WIN32_AUTOSTART", NULL);
+		_wputenv(L"TMUX_WIN32_AUTOSTART=");
+	}
+
+	/*
+	 * Output is UTF-8 with LF line endings, as on Unix, whether it goes to
+	 * a console, a pipe or a file.
+	 */
+	if (GetStdHandle(STD_OUTPUT_HANDLE) != NULL &&
+	    GetStdHandle(STD_OUTPUT_HANDLE) != INVALID_HANDLE_VALUE)
+		_setmode(STDOUT_FILENO, _O_BINARY);
+	if (GetStdHandle(STD_ERROR_HANDLE) != NULL &&
+	    GetStdHandle(STD_ERROR_HANDLE) != INVALID_HANDLE_VALUE)
+		_setmode(STDERR_FILENO, _O_BINARY);
+
 	win32_init_environ();
 	win32_utf8_main_args(&argc, &argv);
 	win32_wsa_init();
@@ -603,15 +689,22 @@ main(int argc, char **argv)
 			/*
 			 * On Windows, -S is an IPC label, not a file path.
 			 * Strip any directory prefix (Unix paths are
-			 * meaningless here) so -S /tmp/foo becomes "foo".
+			 * meaningless here) so -S /tmp/foo becomes "foo". The
+			 * label is checked and prefixed with the user name
+			 * like -L below.
 			 */
-			if (strchr(optarg, '/') != NULL) {
-				const char *base;
+			if (strpbrk(optarg, "/\\") != NULL) {
+				const char *base = optarg, *cp;
+
 				fprintf(stderr, "warning: -S \"%s\" is a "
-				    "Unix-style path; on Windows the "
-				    "basename is used as an IPC label\n",
-				    optarg);
-				base = strrchr(optarg, '/') + 1;
+				    "%spath; on Windows the basename is used "
+				    "as an IPC label\n", optarg,
+				    strchr(optarg, '/') != NULL ?
+				    "Unix-style " : "");
+				for (cp = optarg; *cp != '\0'; cp++) {
+					if (*cp == '/' || *cp == '\\')
+						base = cp + 1;
+				}
 				if (*base == '\0')
 					base = "default";
 				path = xstrdup(base);
@@ -707,6 +800,17 @@ main(int argc, char **argv)
 	 * used. Otherwise, $TMUX is checked and if that fails "default" is
 	 * used.
 	 */
+#ifdef _WIN32
+	if (path == NULL && label == NULL) {
+		path = win32_getenv_utf8(L"TMUX");
+		if (path != NULL && (*path == '\0' || *path == ',')) {
+			free(path);
+			path = NULL;
+		}
+		if (path != NULL)
+			path[strcspn(path, ",")] = '\0';
+	}
+#else
 	if (path == NULL && label == NULL) {
 		s = getenv("TMUX");
 		if (s != NULL && *s != '\0' && *s != ',') {
@@ -714,6 +818,17 @@ main(int argc, char **argv)
 			path[strcspn(path, ",")] = '\0';
 		}
 	}
+#endif
+#ifdef _WIN32
+	if (path != NULL) {
+		s = path;
+		if ((path = win32_socket_name(s, 1, &cause)) == NULL) {
+			fprintf(stderr, "%s\n", cause);
+			exit(1);
+		}
+		free((void *)s);
+	}
+#endif
 	if (path == NULL) {
 		if ((path = make_label(label, &cause)) == NULL) {
 			if (cause != NULL) {

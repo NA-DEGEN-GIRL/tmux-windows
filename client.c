@@ -43,10 +43,26 @@ static struct tmuxpeer	*client_peer;
 static uint64_t		 client_flags;
 static int		 client_suspended;
 #ifdef _WIN32
+/*
+ * The tty channel: a second connection to the server carrying the terminal
+ * (or, in control mode, standard input and output). Output from the server is
+ * written to the console by the event loop and console input is sent by a
+ * thread, since libevent cannot wait on console handles.
+ */
 static int		 client_tty_fd = -1;
+static char		 client_tty_token[65];
 static struct event	 client_tty_event;
+static HANDLE		 client_tty_out = INVALID_HANDLE_VALUE;
 static HANDLE		 client_stdin_thread_h = NULL;
+static HANDLE		 client_stdin_stop;
 static volatile int	 client_tty_running = 0;
+static int		 client_tty_relaying;
+static int		 client_tty_raw;
+static int		 client_tty_eof;
+
+static HANDLE		 client_server_process;
+static char		*client_server_errlog;
+static char		*client_connect_cause;
 #endif
 static enum {
 	CLIENT_EXIT_NONE,
@@ -81,8 +97,16 @@ static void		 client_dispatch_attached(struct imsg *);
 static void		 client_dispatch_wait(struct imsg *);
 static const char	*client_exit_message(void);
 #ifdef _WIN32
-static void		 client_start_tty_relay(void);
+static int		 client_start_server(const char *, char **);
+static char		*client_server_failure(void);
+static void		 client_start_tty_relay(int);
 static void		 client_stop_tty_relay(void);
+static void		 client_tty_drain(DWORD);
+static void		 client_start_stdin_thread(void);
+static void		 client_stop_stdin_thread(void);
+static void		 client_lock(const char *);
+static void		 client_send_resize(void);
+static void		 client_kill_parent(pid_t);
 #endif
 
 /*
@@ -121,56 +145,60 @@ static int
 client_connect(struct event_base *base, const char *path, uint64_t flags)
 {
 #ifdef _WIN32
-	int	fd;
+	int	 fd, status;
+	char	*cause = NULL;
+	HANDLE	 lock;
 
 	log_debug("connecting to server label %s", path);
 
-	fd = win32_ipc_connect(path);
-	if (fd != -1) {
-		setblocking(fd, 0);
-		return (fd);
+	/*
+	 * A server started by a client goes straight to starting. Anything
+	 * else tries to connect first (so, as on Unix, an explicit -D becomes
+	 * a client of a server that is already running).
+	 */
+	if (!win32_server_autostart) {
+		fd = win32_ipc_connect(path, NULL, &status, &cause);
+		if (fd != -1)
+			goto connected;
+		if (status != WIN32_IPC_NOSERVER)
+			goto failed;
+		log_debug("no server running");
 	}
 
-	log_debug("connect failed, starting server");
-
-	if (flags & CLIENT_NOSTARTSERVER)
+	if ((flags & CLIENT_NOSTARTSERVER) || (~flags & CLIENT_STARTSERVER)) {
+		errno = ECONNREFUSED;
 		return (-1);
-	if (~flags & CLIENT_STARTSERVER)
-		return (-1);
+	}
 
 	if (flags & CLIENT_NOFORK) {
 		/*
-		 * This process IS the server (launched with -D).
-		 * Call server_start() inline; it enters the event loop
-		 * and never returns for CLIENT_NOFORK.
+		 * This process IS the server (launched with -D). Call
+		 * server_start() inline; it enters the event loop and never
+		 * returns for CLIENT_NOFORK.
 		 */
-		fd = server_start(client_proc, flags, base, -1, NULL);
-		setblocking(fd, 0);
-		return (fd);
+		return (server_start(client_proc, flags, base, -1, NULL));
 	}
 
 	/*
-	 * Launch a detached server process and poll for its named
-	 * pipe to appear. Once the pipe exists, WaitNamedPipe handles
-	 * the "busy" case internally.
+	 * Only one client starts the server for a label at a time; the others
+	 * wait and then find it running. Start one only if there is definitely
+	 * no server.
 	 */
-	win32_launch_server(path);
-	{
-		int	retries;
+	lock = win32_server_lock(path);
+	fd = win32_ipc_connect(path, NULL, &status, &cause);
+	if (fd == -1 && status == WIN32_IPC_NOSERVER)
+		fd = client_start_server(path, &cause);
+	win32_server_unlock(lock);
+	if (fd == -1)
+		goto failed;
 
-		for (retries = 0; retries < 50; retries++) {
-			Sleep(100);
-			fd = win32_ipc_connect(path);
-			if (fd != -1) {
-				log_debug("server connected after %d retries",
-				    retries + 1);
-				setblocking(fd, 0);
-				return (fd);
-			}
-		}
-	}
+connected:
+	setblocking(fd, 0);
+	return (fd);
 
-	log_debug("server did not start in time");
+failed:
+	client_connect_cause = cause;
+	errno = EIO;
 	return (-1);
 #else
 	struct sockaddr_un	sa;
@@ -359,6 +387,12 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 #endif
 	fd = client_connect(base, socket_path, client_flags);
 	if (fd == -1) {
+#ifdef _WIN32
+		if (client_connect_cause != NULL) {
+			fprintf(stderr, "%s\n", client_connect_cause);
+			return (1);
+		}
+#endif
 		if (errno == ECONNREFUSED) {
 			fprintf(stderr, "no server running on %s\n",
 			    socket_path);
@@ -369,6 +403,39 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 		return (1);
 	}
 	client_peer = proc_add_peer(client_proc, fd, client_dispatch, NULL);
+
+#ifdef _WIN32
+	/*
+	 * Open the tty channel if there is a terminal (a console on standard
+	 * input, as on Unix the terminal is standard input) or for control
+	 * mode, where it carries standard input and output. Clients run with
+	 * pipes, by scripts and tools, have no use for it and do not wait for
+	 * it. It is set up before identifying so the server can match it
+	 * straight away.
+	 */
+	if ((client_flags & CLIENT_CONTROL) ||
+	    win32_tty_is_console(GetStdHandle(STD_INPUT_HANDLE))) {
+		int	 status;
+		char	*tty_cause = NULL;
+
+		win32_generate_tty_token(client_tty_token,
+		    sizeof client_tty_token);
+		if (*client_tty_token != '\0') {
+			client_tty_fd = win32_ipc_connect(socket_path,
+			    client_tty_token, &status, &tty_cause);
+		}
+		if (client_tty_fd == -1) {
+			if (client_flags & CLIENT_CONTROL) {
+				fprintf(stderr, "%s\n", tty_cause != NULL ?
+				    tty_cause : "can't open control channel");
+				return (1);
+			}
+			log_debug("no tty channel: %s", tty_cause != NULL ?
+			    tty_cause : "no token");
+		}
+		free(tty_cause);
+	}
+#endif
 
 	/* Save these before pledge(). */
 	if ((cwd = find_cwd()) == NULL && (cwd = find_home()) == NULL)
@@ -475,12 +542,29 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 	} else if (msg == MSG_SHELL)
 		proc_send(client_peer, msg, -1, NULL, 0);
 
+#ifdef _WIN32
+	/*
+	 * Control mode clients are never sent MSG_READY: relay standard input
+	 * and output through the channel from the start.
+	 */
+	if (client_flags & CLIENT_CONTROL)
+		client_start_tty_relay(0);
+#endif
+
 	/* Start main loop. */
 	proc_loop(client_proc, NULL);
 
 #ifdef _WIN32
 	/* Stop tty relay and restore console. */
 	client_stop_tty_relay();
+
+	/* If a server we started has died, say why if it left a reason. */
+	if (client_exitreason == CLIENT_EXIT_LOST_SERVER &&
+	    client_server_process != NULL &&
+	    WaitForSingleObject(client_server_process, 1000) == WAIT_OBJECT_0) {
+		client_exitmessage = client_server_failure();
+		client_exitreason = CLIENT_EXIT_MESSAGE_PROVIDED;
+	}
 #endif
 
 	/* Run command if user requested exec, instead of exiting. */
@@ -502,7 +586,11 @@ client_main(struct event_base *base, int argc, char **argv, uint64_t flags,
 
 		ppid = getppid();
 		if (client_exittype == MSG_DETACHKILL && ppid > 1)
+#ifdef _WIN32
+			client_kill_parent(ppid);
+#else
 			kill(ppid, SIGHUP);
+#endif
 	} else if (client_flags & CLIENT_CONTROL) {
 		if (client_exitreason != CLIENT_EXIT_NONE)
 			printf("%%exit %s\n", client_exit_message());
@@ -539,27 +627,12 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 {
 	char	**ss;
 	size_t	  sslen;
+#ifndef _WIN32
 	int	  fd;
+#endif
 	uint64_t  flags = client_flags;
 	pid_t	  pid;
 	u_int	  i;
-#ifdef _WIN32
-	char	  tty_token[65] = "";
-#endif
-
-#ifdef _WIN32
-	/*
-	 * Connect TTY channel early (before sending identify messages) to
-	 * give the server maximum time to accept() it. The named pipe has
-	 * nMaxInstances=1, so this second connection must wait for the pipe
-	 * thread's disconnect/reconnect cycle — doing it first minimizes the
-	 * chance the server processes MSG_IDENTIFY_DONE before accepting the
-	 * TTY channel.
-	 */
-	win32_generate_tty_token(tty_token, sizeof tty_token);
-	if (tty_token[0] != '\0')
-		client_tty_fd = win32_ipc_connect_tty(socket_path, tty_token);
-#endif
 
 	proc_send(client_peer, MSG_IDENTIFY_LONGFLAGS, -1, &flags, sizeof flags);
 	proc_send(client_peer, MSG_IDENTIFY_LONGFLAGS, -1, &client_flags,
@@ -583,7 +656,7 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 	proc_send(client_peer, MSG_IDENTIFY_STDOUT, -1, NULL, 0);
 	if (client_tty_fd != -1) {
 		proc_send(client_peer, MSG_IDENTIFY_TTYTOKEN, -1,
-		    tty_token, strlen(tty_token) + 1);
+		    client_tty_token, strlen(client_tty_token) + 1);
 	}
 #else
 	if ((fd = dup(STDIN_FILENO)) == -1)
@@ -612,15 +685,8 @@ client_send_identify(const char *ttynam, const char *termname, char **caps,
 	 * is a detached process with no console, so it cannot detect the
 	 * client's terminal dimensions on its own.
 	 */
-	{
-		struct msg_resize_data	rd;
-		int			cols = 80, rows = 24;
-
-		win32_tty_get_size(&cols, &rows);
-		rd.sx = cols;
-		rd.sy = rows;
-		proc_send(client_peer, MSG_RESIZE, -1, &rd, sizeof rd);
-	}
+	if (client_tty_fd != -1 && (~client_flags & CLIENT_CONTROL))
+		client_send_resize();
 #endif
 }
 
@@ -656,57 +722,434 @@ client_exec(const char *shell, const char *shellcmd)
 }
 
 #ifdef _WIN32
-/*
- * Tty relay: read from tty socket, write to console stdout.
- * This is the libevent callback fired when the server sends tty output.
- */
-static void
-client_tty_read_cb(int fd, __unused short events, __unused void *arg)
+/* Get the file where a server's standard error goes, creating its directory. */
+static char *
+client_server_log_path(const char *label)
 {
-	char	buf[8192];
-	int	n;
-	DWORD	written;
+	wchar_t	*appdata, *wdir;
+	char	*base, *dir, *path;
 
-	n = recv((SOCKET)fd, buf, sizeof buf, 0);
-	if (n <= 0) {
-		event_del(&client_tty_event);
-		return;
+	if ((appdata = _wgetenv(L"LOCALAPPDATA")) == NULL &&
+	    (appdata = _wgetenv(L"TEMP")) == NULL)
+		return (NULL);
+	if ((base = win32_ipc_wide_to_utf8(appdata)) == NULL)
+		return (NULL);
+	xasprintf(&dir, "%s\\tmux", base);
+	free(base);
+	if ((wdir = win32_ipc_utf8_to_wide(dir)) != NULL) {
+		_wmkdir(wdir);
+		free(wdir);
 	}
-	WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), buf, n, &written, NULL);
+	xasprintf(&path, "%s\\%s.server.log", dir, label);
+	free(dir);
+	return (path);
+}
+
+/* Explain why the server we started has exited, from what it left behind. */
+static char *
+client_server_failure(void)
+{
+	wchar_t	*wpath;
+	HANDLE	 h;
+	char	 buf[4096], *msg, *cp;
+	DWORD	 n = 0, code = 0;
+
+	*buf = '\0';
+	if (client_server_errlog != NULL &&
+	    (wpath = win32_ipc_utf8_to_wide(client_server_errlog)) != NULL) {
+		h = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ|
+		    FILE_SHARE_WRITE|FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0,
+		    NULL);
+		free(wpath);
+		if (h != INVALID_HANDLE_VALUE) {
+			if (!ReadFile(h, buf, sizeof buf - 1, &n, NULL))
+				n = 0;
+			buf[n] = '\0';
+			CloseHandle(h);
+		}
+	}
+	cp = buf + strlen(buf);
+	while (cp > buf && (cp[-1] == '\r' || cp[-1] == '\n' || cp[-1] == ' '))
+		*--cp = '\0';
+
+	if (client_server_process != NULL)
+		GetExitCodeProcess(client_server_process, &code);
+	if (*buf != '\0')
+		xasprintf(&msg, "server exited unexpectedly: %s", buf);
+	else {
+		xasprintf(&msg, "server exited unexpectedly (exit code %lu)",
+		    (u_long)code);
+	}
+	return (msg);
+}
+
+/* Make a configuration file path absolute for a new server. */
+static char *
+client_server_config_path(const char *path)
+{
+	char	*copy, resolved[PATH_MAX];
+
+	if (_stricmp(path, "NUL") == 0 || strncmp(path, "~/", 2) == 0)
+		return (xstrdup(path));
+	copy = xstrdup(path);
+	/* Undo the MSYS escape of a drive colon: C\:/foo is C:/foo. */
+	if (copy[0] != '\0' && copy[1] == '\\' && copy[2] == ':')
+		memmove(copy + 1, copy + 2, strlen(copy + 2) + 1);
+	if (_fullpath(resolved, copy, sizeof resolved) == NULL)
+		return (copy);
+	free(copy);
+	return (xstrdup(resolved));
 }
 
 /*
- * Tty relay: read from console stdin, write to tty socket.
- * Runs in a separate thread since ReadFile on console blocks.
+ * Start a server process and connect to it. The server is given the same
+ * label, configuration files and verbosity that a forked server would have
+ * inherited on Unix. Returns the connected socket or -1 with *cause set.
  */
-static DWORD WINAPI
-client_stdin_thread_func(LPVOID arg)
+static int
+client_start_server(const char *path, char **cause)
 {
-	int	fd = (int)(intptr_t)arg;
-	HANDLE	h = GetStdHandle(STD_INPUT_HANDLE);
-	char	buf[8192];
-	DWORD	nread;
+	char		**argv = NULL;
+	int		  argc = 0, fd = -1, status, i, level;
+	u_int		  n;
+	HANDLE		  process;
+	ULONGLONG	  deadline;
 
-	while (client_tty_running) {
-		if (!ReadFile(h, buf, sizeof buf, &nread, NULL) || nread == 0)
+	argv = xreallocarray(argv, 3 + 2 * cfg_nfiles + 8, sizeof *argv);
+	argv[argc++] = xstrdup("-D");
+	argv[argc++] = xstrdup("-S");
+	argv[argc++] = xstrdup(path);
+	if (!cfg_quiet) {
+		/* Only when -f was given; otherwise the server finds them. */
+		for (n = 0; n < cfg_nfiles; n++) {
+			argv[argc++] = xstrdup("-f");
+			argv[argc++] = client_server_config_path(cfg_files[n]);
+		}
+	}
+	level = log_get_level();
+	for (i = 0; i < level && i < 8; i++)
+		argv[argc++] = xstrdup("-v");
+
+	client_server_errlog = client_server_log_path(path);
+	process = win32_launch_server(argc, argv, client_server_errlog, cause);
+	for (i = 0; i < argc; i++)
+		free(argv[i]);
+	free(argv);
+	if (process == NULL)
+		return (-1);
+	log_debug("started server process %lu", (u_long)GetProcessId(process));
+
+	/* Wait for the server to appear, or to die trying. */
+	deadline = GetTickCount64() + 10000;
+	for (;;) {
+		fd = win32_ipc_connect(path, NULL, &status, cause);
+		if (fd != -1 || status != WIN32_IPC_NOSERVER)
 			break;
-		if (send((SOCKET)fd, buf, (int)nread, 0) <= 0)
+		if (WaitForSingleObject(process, 10) == WAIT_OBJECT_0) {
+			/* Another server may have won a race with ours. */
+			fd = win32_ipc_connect(path, NULL, &status, cause);
+			if (fd == -1 && status == WIN32_IPC_NOSERVER) {
+				client_server_process = process;
+				*cause = client_server_failure();
+				client_server_process = NULL;
+			}
 			break;
+		}
+		if (GetTickCount64() > deadline) {
+			xasprintf(cause, "server %s did not start", path);
+			break;
+		}
+	}
+	if (fd == -1) {
+		CloseHandle(process);
+		return (-1);
+	}
+	client_server_process = process;
+	return (fd);
+}
+
+/* Write all of a buffer to where tty output goes. */
+static void
+client_tty_write(const char *buf, size_t len)
+{
+	DWORD	written;
+
+	while (len > 0) {
+		if (!WriteFile(client_tty_out, buf, (DWORD)len, &written,
+		    NULL) || written == 0)
+			return;
+		buf += written;
+		len -= written;
+	}
+}
+
+/* Tty relay: copy output from the server to the console (or stdout). */
+static void
+client_tty_read_cb(int fd, __unused short events, __unused void *arg)
+{
+	char	buf[65536];
+	int	n, i;
+
+	for (i = 0; i < 16; i++) {
+		n = recv((SOCKET)fd, buf, sizeof buf, 0);
+		if (n > 0) {
+			client_tty_write(buf, n);
+			continue;
+		}
+		if (n == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK)
+			return;
+		/* The server has finished with the channel. */
+		event_del(&client_tty_event);
+		client_tty_eof = 1;
+		return;
+	}
+}
+
+/*
+ * Copy whatever the server has still to send on the channel, until it ends
+ * the channel or nothing arrives for a while.
+ */
+static void
+client_tty_drain(DWORD idle)
+{
+	char		 buf[65536];
+	fd_set		 set;
+	struct timeval	 tv;
+	ULONGLONG	 deadline;
+	int		 n;
+
+	if (client_tty_fd == -1 || client_tty_eof)
+		return;
+	deadline = GetTickCount64() + 3000;
+	while (GetTickCount64() < deadline) {
+		FD_ZERO(&set);
+		FD_SET((SOCKET)client_tty_fd, &set);
+		tv.tv_sec = idle / 1000;
+		tv.tv_usec = (idle % 1000) * 1000;
+		if (select(0, &set, NULL, NULL, &tv) != 1)
+			return;
+		n = recv((SOCKET)client_tty_fd, buf, sizeof buf, 0);
+		if (n > 0) {
+			client_tty_write(buf, n);
+			continue;
+		}
+		if (n == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK)
+			continue;
+		client_tty_eof = 1;
+		return;
+	}
+}
+
+/* Send all of a buffer on the non-blocking channel socket. */
+static int
+client_tty_send(SOCKET s, const char *buf, size_t len)
+{
+	fd_set		set;
+	struct timeval	tv;
+	int		n;
+
+	while (len > 0) {
+		n = send(s, buf, (int)len, 0);
+		if (n > 0) {
+			buf += n;
+			len -= n;
+			continue;
+		}
+		if (n == 0 || WSAGetLastError() != WSAEWOULDBLOCK)
+			return (-1);
+
+		/* The server is busy (a large paste): wait for room. */
+		if (!client_tty_running)
+			return (-1);
+		FD_ZERO(&set);
+		FD_SET(s, &set);
+		tv.tv_sec = 0;
+		tv.tv_usec = 100000;
+		select(0, NULL, &set, NULL, &tv);
 	}
 	return (0);
 }
 
 /*
- * Start the tty relay after the client becomes attached.
+ * Wait until there is console input that ReadFile will return at once, or
+ * until the thread is told to stop. Records that give no input (key releases,
+ * lone modifiers, focus, menu and size events) are dropped first so that a
+ * raw console read never blocks: a blocked console read cannot reliably be
+ * cancelled and would take input meant for whatever uses the console next,
+ * such as lock-command. Returns 0 if there is input, -1 to stop.
+ */
+static int
+client_console_wait(HANDLE h)
+{
+	INPUT_RECORD		 ir[64];
+	HANDLE			 handles[2];
+	KEY_EVENT_RECORD	*ke;
+	DWORD			 n, i, dropped;
+
+	handles[0] = client_stdin_stop;
+	handles[1] = h;
+	for (;;) {
+		if (WaitForMultipleObjects(2, handles, FALSE, INFINITE) !=
+		    WAIT_OBJECT_0 + 1)
+			return (-1);
+		if (!PeekConsoleInputW(h, ir, nitems(ir), &n))
+			return (-1);
+		for (i = 0; i < n; i++) {
+			if (ir[i].EventType != KEY_EVENT)
+				continue;
+			ke = &ir[i].Event.KeyEvent;
+			if (!ke->bKeyDown)
+				continue;
+			if (ke->uChar.UnicodeChar != 0)
+				break;
+			switch (ke->wVirtualKeyCode) {
+			case VK_SHIFT:
+			case VK_CONTROL:
+			case VK_MENU:
+			case VK_CAPITAL:
+			case VK_NUMLOCK:
+			case VK_SCROLL:
+			case VK_LWIN:
+			case VK_RWIN:
+				continue;
+			}
+			break;
+		}
+		if (i != 0 && !ReadConsoleInputW(h, ir, i, &dropped))
+			return (-1);
+		if (i < n)
+			return (0);
+		if (n == 0)
+			Sleep(10);
+	}
+}
+
+/*
+ * Tty relay: read from console stdin (or, in control mode, any stdin) and
+ * send it to the server. Runs in a separate thread since reads block.
+ */
+static DWORD WINAPI
+client_stdin_thread_func(LPVOID arg)
+{
+	SOCKET	 s = (SOCKET)(intptr_t)arg;
+	HANDLE	 h = GetStdHandle(STD_INPUT_HANDLE);
+	char	 buf[8193], *in, *out;
+	DWORD	 nread, mode, error;
+	int	 console, ispipe, control, eof = 0, cr = 0;
+
+	console = GetConsoleMode(h, &mode);
+	ispipe = !console && GetFileType(h) == FILE_TYPE_PIPE;
+	control = (client_flags & CLIENT_CONTROL) != 0;
+
+	while (client_tty_running) {
+		if (console && client_console_wait(h) != 0)
+			break;
+		if (!ReadFile(h, buf + 1, sizeof buf - 1, &nread, NULL)) {
+			error = GetLastError();
+			if (error == ERROR_OPERATION_ABORTED &&
+			    client_tty_running && console)
+				continue; /* Ctrl-C in a cooked console */
+			/* End of a pipe or a bad handle: no more input. */
+			eof = client_tty_running;
+			break;
+		}
+		if (nread == 0) {
+			/* A pipe can carry empty writes. */
+			if (ispipe || (console && !control))
+				continue;
+			eof = 1; /* Ctrl-Z in a console or end of a file */
+			break;
+		}
+
+		/*
+		 * Control mode reads lines ending in LF. Windows programs
+		 * (a console, PowerShell writing to a pipe) end them with CRLF,
+		 * so drop a CR before LF, also when the two arrive in separate
+		 * reads: a CR at the end of a read is held back until the
+		 * next.
+		 */
+		in = buf + 1;
+		if (control) {
+			if (cr) {
+				*--in = '\r';
+				nread++;
+			}
+			cr = (in[nread - 1] == '\r');
+			if (cr)
+				nread--;
+			for (out = buf; nread > 0; in++, nread--) {
+				if (in[0] == '\r' && nread > 1 && in[1] == '\n')
+					continue;
+				*out++ = *in;
+			}
+			in = buf;
+			nread = (DWORD)(out - buf);
+		}
+		if (nread != 0 && client_tty_send(s, in, nread) != 0)
+			break;
+	}
+
+	/* No more input: tell the server, as closing stdin does on Unix. */
+	if (eof && control) {
+		if (cr)
+			client_tty_send(s, "\r", 1);
+		shutdown(s, SD_SEND);
+	}
+	return (0);
+}
+
+/* Start the thread reading stdin. */
+static void
+client_start_stdin_thread(void)
+{
+	if (client_tty_fd == -1 || client_stdin_thread_h != NULL)
+		return;
+	if (client_stdin_stop == NULL)
+		client_stdin_stop = CreateEventW(NULL, TRUE, FALSE, NULL);
+	else
+		ResetEvent(client_stdin_stop);
+	client_tty_running = 1;
+	client_stdin_thread_h = CreateThread(NULL, 0, client_stdin_thread_func,
+	    (LPVOID)(intptr_t)client_tty_fd, 0, NULL);
+}
+
+/* Stop the thread reading stdin, interrupting a blocked read. */
+static void
+client_stop_stdin_thread(void)
+{
+	int	i;
+
+	if (client_stdin_thread_h == NULL)
+		return;
+	client_tty_running = 0;
+	if (client_stdin_stop != NULL)
+		SetEvent(client_stdin_stop);
+	for (i = 0; i < 20; i++) {
+		CancelSynchronousIo(client_stdin_thread_h);
+		if (WaitForSingleObject(client_stdin_thread_h, 50) ==
+		    WAIT_OBJECT_0)
+			break;
+	}
+	CloseHandle(client_stdin_thread_h);
+	client_stdin_thread_h = NULL;
+}
+
+/*
+ * Start relaying the tty channel: as the terminal once attached (console in
+ * raw mode), or as standard input and output in control mode.
  */
 static void
-client_start_tty_relay(void)
+client_start_tty_relay(int terminal)
 {
-	if (client_tty_fd == -1)
+	if (client_tty_fd == -1 || client_tty_relaying)
 		return;
+	client_tty_relaying = 1;
 
-	/* Set console to raw VT mode. */
-	win32_tty_raw_mode();
+	if (terminal) {
+		client_tty_out = win32_tty_output();
+		client_tty_raw = (win32_tty_raw_mode() == 0);
+	} else
+		client_tty_out = GetStdHandle(STD_OUTPUT_HANDLE);
 
 	/* Set tty socket to non-blocking for libevent. */
 	setblocking(client_tty_fd, 0);
@@ -716,39 +1159,127 @@ client_start_tty_relay(void)
 	    EV_READ|EV_PERSIST, client_tty_read_cb, NULL);
 	event_add(&client_tty_event, NULL);
 
-	/* Start stdin reader thread. */
-	client_tty_running = 1;
-	client_stdin_thread_h = CreateThread(NULL, 0,
-	    client_stdin_thread_func, (LPVOID)(intptr_t)client_tty_fd,
-	    0, NULL);
+	client_start_stdin_thread();
 }
 
 /*
- * Stop the tty relay on detach/exit.
+ * Stop the tty relay on detach/exit: stop reading input, write out what the
+ * server sent last (such as resetting the terminal) and restore the console.
  */
 static void
 client_stop_tty_relay(void)
 {
-	client_tty_running = 0;
+	client_stop_stdin_thread();
 
 	if (event_initialized(&client_tty_event))
 		event_del(&client_tty_event);
 
-	/* Cancel blocking ReadFile. */
-	if (client_stdin_thread_h != NULL) {
-		CancelIoEx(GetStdHandle(STD_INPUT_HANDLE), NULL);
-		WaitForSingleObject(client_stdin_thread_h, 1000);
-		CloseHandle(client_stdin_thread_h);
-		client_stdin_thread_h = NULL;
-	}
-
 	if (client_tty_fd != -1) {
+		if (client_tty_relaying)
+			client_tty_drain(1000);
 		closesocket((SOCKET)client_tty_fd);
 		client_tty_fd = -1;
 	}
 
 	/* Restore console mode. */
-	win32_tty_restore();
+	if (client_tty_raw) {
+		win32_tty_restore();
+		client_tty_raw = 0;
+	}
+	client_tty_relaying = 0;
+}
+
+/*
+ * Lock: hand the console to the lock command and take it back afterwards.
+ * The server has already sent the sequences to clear the screen.
+ */
+static void
+client_lock(const char *cmd)
+{
+	client_tty_drain(100);
+	client_stop_stdin_thread();
+	if (client_tty_raw)
+		win32_tty_restore();
+
+	if (system(cmd) == -1)
+		log_debug("lock command failed: %s", strerror(errno));
+
+	if (client_tty_raw)
+		client_tty_raw = (win32_tty_raw_mode() == 0);
+	client_start_stdin_thread();
+}
+
+/*
+ * Tell the server the console size: it has no console of its own to ask, so
+ * the client sends its dimensions with MSG_RESIZE.
+ */
+static void
+client_send_resize(void)
+{
+	struct msg_resize_data	rd;
+	int			cols = 80, rows = 24;
+
+	win32_tty_get_size(&cols, &rows);
+	rd.sx = cols;
+	rd.sy = rows;
+	proc_send(client_peer, MSG_RESIZE, -1, &rd, sizeof rd);
+}
+
+/* Is a process attached to the same console as the client? */
+static int
+client_shares_console(DWORD pid)
+{
+	DWORD	*list, n, size = 64, i;
+	int	 found = 0;
+
+	for (;;) {
+		list = xreallocarray(NULL, size, sizeof *list);
+		n = GetConsoleProcessList(list, size);
+		if (n <= size)
+			break;
+		free(list);
+		size = n + 16;
+	}
+	for (i = 0; i < n; i++) {
+		if (list[i] == pid) {
+			found = 1;
+			break;
+		}
+	}
+	free(list);
+	return (found);
+}
+
+/*
+ * Like SIGHUP to the parent on Unix (detach-client -P): end the process that
+ * started the client, normally the shell. Only a parent on the client's own
+ * console is ended: a SIGHUP can be caught or ignored but TerminateProcess
+ * cannot, and a parent that hosts the console rather than runs in it (such as
+ * Windows Terminal, or a tmux server running the client in a pane) has other
+ * windows and sessions to lose. The process is also checked to still be our
+ * parent (created before us) so a reused process ID is never hit.
+ */
+static void
+client_kill_parent(pid_t ppid)
+{
+	HANDLE		h;
+	FILETIME	pc, sc, x1, x2, x3;
+
+	if (!client_shares_console((DWORD)ppid)) {
+		log_debug("parent %ld is not on our console", (long)ppid);
+		return;
+	}
+	h = OpenProcess(PROCESS_TERMINATE|PROCESS_QUERY_LIMITED_INFORMATION,
+	    FALSE, (DWORD)ppid);
+	if (h == NULL)
+		return;
+	if (GetProcessTimes(h, &pc, &x1, &x2, &x3) &&
+	    GetProcessTimes(GetCurrentProcess(), &sc, &x1, &x2, &x3) &&
+	    CompareFileTime(&pc, &sc) <= 0) {
+		log_debug("terminating parent %ld", (long)ppid);
+		TerminateProcess(h, 0);
+	}
+	CloseHandle(h);
 }
 #endif
 
@@ -795,16 +1326,7 @@ client_signal(int sig)
 			break;
 		case SIGWINCH:
 #ifdef _WIN32
-			{
-				struct msg_resize_data	rd;
-				int			cols = 80, rows = 24;
-
-				win32_tty_get_size(&cols, &rows);
-				rd.sx = cols;
-				rd.sy = rows;
-				proc_send(client_peer, MSG_RESIZE, -1,
-				    &rd, sizeof rd);
-			}
+			client_send_resize();
 #else
 			proc_send(client_peer, MSG_RESIZE, -1, NULL, 0);
 #endif
@@ -918,9 +1440,11 @@ client_dispatch_wait(struct imsg *imsg)
 
 		client_attached = 1;
 #ifdef _WIN32
-		client_start_tty_relay();
-#endif
+		client_start_tty_relay(1);
+		client_send_resize();
+#else
 		proc_send(client_peer, MSG_RESIZE, -1, NULL, 0);
+#endif
 		break;
 	case MSG_VERSION:
 		if (datalen != 0)
@@ -985,7 +1509,9 @@ client_dispatch_wait(struct imsg *imsg)
 static void
 client_dispatch_attached(struct imsg *imsg)
 {
+#ifndef _WIN32
 	struct sigaction	 sigact;
+#endif
 	char			*data;
 	ssize_t			 datalen;
 
@@ -1049,7 +1575,12 @@ client_dispatch_attached(struct imsg *imsg)
 			fatalx("bad MSG_SUSPEND size");
 
 #ifdef _WIN32
-		/* No suspend on Windows, just ignore. */
+		/*
+		 * There is no job control to stop the client and nothing to
+		 * continue it, so leaving it suspended would freeze it: wake
+		 * up again at once instead (suspend-client just redraws).
+		 */
+		proc_send(client_peer, MSG_WAKEUP, -1, NULL, 0);
 #else
 		memset(&sigact, 0, sizeof sigact);
 		sigemptyset(&sigact.sa_mask);
@@ -1065,7 +1596,11 @@ client_dispatch_attached(struct imsg *imsg)
 		if (datalen == 0 || data[datalen - 1] != '\0')
 			fatalx("bad MSG_LOCK string");
 
+#ifdef _WIN32
+		client_lock(data);
+#else
 		system(data);
+#endif
 		proc_send(client_peer, MSG_UNLOCK, -1, NULL, 0);
 		break;
 	}

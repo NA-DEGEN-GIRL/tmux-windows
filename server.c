@@ -74,6 +74,42 @@ struct pending_tty {
 static TAILQ_HEAD(, pending_tty) pending_ttys =
     TAILQ_HEAD_INITIALIZER(pending_ttys);
 
+/*
+ * Connections that have been accepted but have not yet sent their
+ * authentication line. They are read without blocking so a peer that connects
+ * and sends nothing cannot stall the server; there are only so many and each
+ * has a deadline.
+ */
+#define MAX_PENDING_AUTHS	64
+#define PENDING_AUTH_TIMEOUT	5 /* seconds */
+
+struct pending_auth {
+	int				 fd;
+	struct event			 event;
+	uint64_t			 deadline;
+	struct win32_ipc_auth		 auth;
+	TAILQ_ENTRY(pending_auth)	 entry;
+};
+static TAILQ_HEAD(, pending_auth) pending_auths =
+    TAILQ_HEAD_INITIALIZER(pending_auths);
+static u_int			  npending_auths;
+
+/* How long a server started by a client waits for that client. */
+#define SERVER_FIRST_CLIENT 10 /* seconds */
+static uint64_t			  server_first_deadline;
+static struct event		  server_ev_first;
+
+static void	server_accept_authenticated(int, int, const char *);
+
+/* The first client has had time to connect; the loop checks if empty. */
+static void
+server_first_event(__unused int fd, __unused short events,
+    __unused void *data)
+{
+	log_debug("first client deadline");
+	server_first_deadline = 0;
+}
+
 void
 server_add_pending_tty(const char *token, int fd)
 {
@@ -88,7 +124,7 @@ server_add_pending_tty(const char *token, int fd)
 		if (now - pt->created >= PENDING_TTY_EXPIRY) {
 			log_debug("expiring pending tty: token=%s fd=%d",
 			    pt->token, pt->fd);
-			close(pt->fd);
+			closesocket((SOCKET)pt->fd);
 			TAILQ_REMOVE(&pending_ttys, pt, entry);
 			free(pt);
 		} else
@@ -98,7 +134,7 @@ server_add_pending_tty(const char *token, int fd)
 	/* Enforce cap. */
 	if (count >= MAX_PENDING_TTYS) {
 		log_debug("pending tty queue full, rejecting fd=%d", fd);
-		close(fd);
+		closesocket((SOCKET)fd);
 		return;
 	}
 
@@ -127,6 +163,115 @@ server_get_pending_tty(const char *token)
 		}
 	}
 	return (-1);
+}
+
+/* Forget a pending authentication, closing its socket if asked. */
+static void
+server_free_pending_auth(struct pending_auth *pa, int close_fd)
+{
+	event_del(&pa->event);
+	TAILQ_REMOVE(&pending_auths, pa, entry);
+	npending_auths--;
+	if (close_fd)
+		closesocket((SOCKET)pa->fd);
+	free(pa);
+}
+
+/* Data (or the deadline) for a connection waiting to authenticate. */
+static void
+server_auth_callback(int fd, short events, void *data)
+{
+	struct pending_auth	*pa = data;
+	char			 token[65];
+	int			 is_tty;
+	uint64_t		 now;
+	struct timeval		 tv;
+
+	if (events & EV_READ) {
+		switch (win32_ipc_read_auth(fd, &pa->auth, token, sizeof token,
+		    &is_tty)) {
+		case 0:
+			server_free_pending_auth(pa, 0);
+			server_accept_authenticated(fd, is_tty, token);
+			return;
+		case -1:
+			log_debug("connection %d failed authentication", fd);
+			server_free_pending_auth(pa, 1);
+			return;
+		}
+	}
+
+	now = get_timer();
+	if (now >= pa->deadline) {
+		log_debug("connection %d did not authenticate in time", fd);
+		server_free_pending_auth(pa, 1);
+		return;
+	}
+	tv.tv_sec = (pa->deadline - now) / 1000;
+	tv.tv_usec = ((pa->deadline - now) % 1000) * 1000;
+	event_add(&pa->event, &tv);
+}
+
+/* Start waiting for a new connection to authenticate. */
+static void
+server_add_pending_auth(int fd)
+{
+	struct pending_auth	*pa;
+	struct timeval		 tv = { .tv_sec = PENDING_AUTH_TIMEOUT };
+
+	/* Make room by dropping the oldest if there are too many. */
+	if (npending_auths >= MAX_PENDING_AUTHS) {
+		pa = TAILQ_FIRST(&pending_auths);
+		log_debug("too many pending connections, dropping %d", pa->fd);
+		server_free_pending_auth(pa, 1);
+	}
+
+	setblocking(fd, 0);
+	pa = xcalloc(1, sizeof *pa);
+	pa->fd = fd;
+	pa->deadline = get_timer() + PENDING_AUTH_TIMEOUT * 1000;
+	event_set(&pa->event, fd, EV_READ, server_auth_callback, pa);
+	event_add(&pa->event, &tv);
+	TAILQ_INSERT_TAIL(&pending_auths, pa, entry);
+	npending_auths++;
+}
+
+/* A connection has authenticated: it is a new client or a tty channel. */
+static void
+server_accept_authenticated(int fd, int is_tty, const char *token)
+{
+	struct client	*c;
+
+	if (server_exit) {
+		closesocket((SOCKET)fd);
+		return;
+	}
+
+	if (is_tty) {
+		/*
+		 * Find the client already waiting for this channel or keep it
+		 * until the client identifies.
+		 */
+		TAILQ_FOREACH(c, &clients, entry) {
+			if (c->tty_token != NULL &&
+			    strcmp(c->tty_token, token) == 0) {
+				server_client_set_tty_fd(c, fd);
+				return;
+			}
+		}
+		server_add_pending_tty(token, fd);
+		return;
+	}
+
+	if (server_first_deadline != 0) {
+		server_first_deadline = 0;
+		evtimer_del(&server_ev_first);
+	}
+	c = server_client_create(fd);
+	if (!server_acl_join(c)) {
+		c->exit_message = xstrdup("access not allowed");
+		c->flags |= CLIENT_EXIT;
+	}
 }
 #endif
 
@@ -189,15 +334,16 @@ int
 server_create_socket(uint64_t flags, char **cause)
 {
 #ifdef _WIN32
-	int		 fd;
-	uint16_t	 port;
+	int	 fd;
+	char	*error = NULL;
 
 	(void)flags;
-	fd = win32_ipc_create_server(socket_path, &port);
+	fd = win32_ipc_create_server(socket_path, &error);
 	if (fd == -1) {
 		if (cause != NULL)
-			xasprintf(cause, "error creating server socket for %s",
-			    socket_path);
+			*cause = error;
+		else
+			free(error);
 		return (-1);
 	}
 	setblocking(fd, 0);
@@ -281,6 +427,10 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 	struct client	*c = NULL;
 	char		*cause = NULL;
 	struct timeval	 tv = { .tv_sec = 3600 };
+#ifdef _WIN32
+	struct timeval	 first_tv = { .tv_sec = SERVER_FIRST_CLIENT };
+	const char	*home;
+#endif
 
 #ifndef _WIN32
 	sigfillset(&set);
@@ -309,6 +459,17 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 
 	if (log_get_level() > 1)
 		tty_create_log();
+#ifdef _WIN32
+	/*
+	 * A server started by a client begins in the client's directory, so
+	 * log files end up there as they would on Unix. Move away so that the
+	 * directory is not held open (and so cannot be removed) while the
+	 * server runs.
+	 */
+	if (win32_server_autostart && (home = find_home()) != NULL &&
+	    chdir(home) != 0)
+		log_debug("can't change directory to %s", home);
+#endif
 	if (pledge("stdio rpath wpath cpath fattr unix getpw recvfd proc exec "
 	    "tty ps", NULL) != 0)
 		fatal("pledge failed");
@@ -332,10 +493,17 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 		server_update_socket();
 	if (~flags & CLIENT_NOFORK)
 		c = server_client_create(fd);
-#ifndef _WIN32
+#ifdef _WIN32
+	/*
+	 * Servers started by clients run with -D as well, but they should exit
+	 * when empty like a forked server on Unix; only a user's own -D server
+	 * stays.
+	 */
+	else if (!win32_server_autostart)
+#else
 	else
-		options_set_number(global_options, "exit-empty", 0);
 #endif
+		options_set_number(global_options, "exit-empty", 0);
 
 	if (lockfd >= 0) {
 		unlink(lockfile);
@@ -358,6 +526,19 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 
 	server_acl_init();
 
+#ifdef _WIN32
+	/*
+	 * A server started by a client has no client yet; give the client
+	 * time to connect before exiting for being empty (and wake up then,
+	 * in case it never does).
+	 */
+	if (win32_server_autostart) {
+		server_first_deadline = get_timer() + SERVER_FIRST_CLIENT * 1000;
+		evtimer_set(&server_ev_first, server_first_event, NULL);
+		evtimer_add(&server_ev_first, &first_tv);
+	}
+#endif
+
 	server_add_accept(0);
 	proc_loop(server_proc, server_loop);
 
@@ -366,7 +547,7 @@ server_start(struct tmuxproc *client, uint64_t flags, struct event_base *base,
 
 #ifdef _WIN32
 	/* Shut down the discovery pipe and accept thread. */
-	win32_ipc_cleanup(socket_path);
+	win32_ipc_cleanup();
 #endif
 
 	exit(0);
@@ -411,6 +592,15 @@ server_loop(void)
 	cmd_wait_for_flush();
 	if (!TAILQ_EMPTY(&clients))
 		return (0);
+#ifdef _WIN32
+	/*
+	 * A connection still authenticating may be the first client, and a
+	 * server started by a client waits a while for it to connect.
+	 */
+	if (!server_exit && (npending_auths != 0 ||
+	    (server_first_deadline != 0 && get_timer() < server_first_deadline)))
+		return (0);
+#endif
 
 	if (job_still_running())
 		return (0);
@@ -490,6 +680,37 @@ server_update_socket(void)
 static void
 server_accept(int fd, short events, __unused void *data)
 {
+#ifdef _WIN32
+	int	newfd, i;
+
+	server_add_accept(0);
+	if (!(events & EV_READ))
+		return;
+
+	/*
+	 * Accept everything that is waiting (within reason). New connections
+	 * must first authenticate with a nonce from the discovery pipe; that
+	 * is read asynchronously so a silent peer cannot block the server.
+	 */
+	for (i = 0; i < 32; i++) {
+		newfd = win32_ipc_accept(fd);
+		if (newfd == -1) {
+			if (errno == EAGAIN)
+				return;
+			/*
+			 * Out of resources or an unexpected error: delete and
+			 * don't try again for 1 second.
+			 */
+			server_add_accept(1);
+			return;
+		}
+		if (server_exit) {
+			closesocket((SOCKET)newfd);
+			continue;
+		}
+		server_add_pending_auth(newfd);
+	}
+#else
 	struct sockaddr_storage	 sa;
 	socklen_t		 slen = sizeof sa;
 	int			 newfd;
@@ -510,80 +731,8 @@ server_accept(int fd, short events, __unused void *data)
 		}
 		fatal("accept failed");
 	}
-
-#ifdef _WIN32
-	/*
-	 * On Windows, the client sends an auth line before the imsg
-	 * protocol. This can be either:
-	 *   "<auth_token>\n" - regular imsg connection
-	 *   "TTY:<token>:<auth_token>\n" - tty data channel
-	 */
-	{
-		char tty_token[65] = {0};
-		int auth_result;
-
-		auth_result = win32_ipc_verify_auth(newfd, socket_path,
-		    tty_token, sizeof tty_token);
-		if (auth_result == -1) {
-			closesocket((SOCKET)newfd);
-			return;
-		}
-		if (auth_result == 1) {
-			/*
-			 * TTY channel. Try to find a client already
-			 * waiting for this token; otherwise queue it.
-			 */
-			struct client *tc;
-			TAILQ_FOREACH(tc, &clients, entry) {
-				if (tc->tty_token != NULL &&
-				    strcmp(tc->tty_token, tty_token) == 0) {
-					tc->fd = newfd;
-					log_debug("matched tty fd %d for "
-					    "client %p", newfd, tc);
-					free(tc->tty_token);
-					tc->tty_token = NULL;
-					if ((tc->flags & CLIENT_IDENTIFIED) &&
-					    !(tc->flags &
-					    (CLIENT_TERMINAL|CLIENT_CONTROL))) {
-						u_int sx = tc->tty.sx;
-						u_int sy = tc->tty.sy;
-						if (tty_init(&tc->tty, tc) == 0) {
-							if (sx == 0)
-								sx = 80;
-							if (sy == 0)
-								sy = 24;
-							tty_set_size(&tc->tty,
-							    sx, sy, 0, 0);
-							tc->flags |= CLIENT_TERMINAL;
-							recalculate_sizes();
-							server_redraw_client(tc);
-						}
-						if (event_initialized(
-						    &tc->tty_wait_timer))
-							evtimer_del(
-							    &tc->tty_wait_timer);
-						if (tc->tty_wait_item != NULL) {
-							cmdq_continue(
-							    tc->tty_wait_item);
-							tc->tty_wait_item = NULL;
-						}
-					}
-					server_add_accept(0);
-					return;
-				}
-			}
-			server_add_pending_tty(tty_token, newfd);
-			return;
-		}
-	}
-#endif
-
 	if (server_exit) {
-#ifdef _WIN32
-		closesocket((SOCKET)newfd);
-#else
 		close(newfd);
-#endif
 		return;
 	}
 	c = server_client_create(newfd);
@@ -591,6 +740,7 @@ server_accept(int fd, short events, __unused void *data)
 		c->exit_message = xstrdup("access not allowed");
 		c->flags |= CLIENT_EXIT;
 	}
+#endif
 }
 
 /*
@@ -623,7 +773,9 @@ server_add_accept(int timeout)
 static void
 server_signal(int sig)
 {
+#ifndef _WIN32
 	int	fd;
+#endif
 
 	log_debug("%s: %s", __func__, strsignal(sig));
 	switch (sig) {

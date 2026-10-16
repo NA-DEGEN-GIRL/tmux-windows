@@ -33,6 +33,10 @@
 
 #include "tmux.h"
 
+#ifdef _WIN32
+#include <tlhelp32.h>
+#endif
+
 static void	server_client_free(int, short, void *);
 static void	server_client_check_pane_resize(struct window_pane *);
 static void	server_client_check_pane_buffer(struct window_pane *);
@@ -94,6 +98,59 @@ server_client_tty_wait_cb(__unused struct cmdq_item *item, __unused void *data)
 	return (CMD_RETURN_NORMAL);
 }
 
+/*
+ * Start using the tty channel of an identified client: as a terminal, or as
+ * standard input and output for control mode.
+ */
+static void
+server_client_start_tty_channel(struct client *c)
+{
+	u_int	sx = c->tty.sx, sy = c->tty.sy;
+
+	if (c->flags & CLIENT_CONTROL) {
+		control_start(c);
+		return;
+	}
+	if (c->flags & CLIENT_TERMINAL)
+		return;
+	if (tty_init(&c->tty, c) != 0) {
+		closesocket((SOCKET)c->fd);
+		c->fd = -1;
+		return;
+	}
+	tty_set_size(&c->tty, sx == 0 ? 80 : sx, sy == 0 ? 24 : sy, 0, 0);
+	c->flags |= CLIENT_TERMINAL;
+}
+
+/* The client's tty channel has arrived. */
+void
+server_client_set_tty_fd(struct client *c, int fd)
+{
+	log_debug("client %p tty channel is %d", c, fd);
+
+	free(c->tty_token);
+	c->tty_token = NULL;
+	if (c->fd != -1) {
+		closesocket((SOCKET)fd);
+		return;
+	}
+	c->fd = fd;
+
+	if (c->flags & CLIENT_IDENTIFIED) {
+		server_client_start_tty_channel(c);
+		if (c->flags & CLIENT_TERMINAL) {
+			recalculate_sizes();
+			server_redraw_client(c);
+		}
+	}
+	if (event_initialized(&c->tty_wait_timer))
+		evtimer_del(&c->tty_wait_timer);
+	if (c->tty_wait_item != NULL) {
+		cmdq_continue(c->tty_wait_item);
+		c->tty_wait_item = NULL;
+	}
+}
+
 /* Safety-net timeout: give up waiting for the TTY channel. */
 static void
 server_client_tty_wait_timeout(__unused int fd, __unused short events,
@@ -106,10 +163,97 @@ server_client_tty_wait_timeout(__unused int fd, __unused short events,
 	free(c->tty_token);
 	c->tty_token = NULL;
 
+	/* Control mode cannot work without the channel. */
+	if (c->flags & CLIENT_CONTROL) {
+		c->flags &= ~(CLIENT_CONTROL|CLIENT_CONTROLCONTROL);
+		c->flags |= CLIENT_EXIT;
+		free(c->exit_message);
+		c->exit_message = xstrdup("control mode channel unavailable");
+	}
+
 	if (c->tty_wait_item != NULL) {
 		cmdq_continue(c->tty_wait_item);
 		c->tty_wait_item = NULL;
 	}
+}
+
+/*
+ * Get a process's parent and creation time from a snapshot. Returns 0 if the
+ * process is not found.
+ */
+static int
+server_client_process_info(HANDLE snap, DWORD pid, DWORD *ppid,
+    ULONGLONG *created)
+{
+	PROCESSENTRY32W	pe;
+	HANDLE		h;
+	FILETIME	ct, x1, x2, x3;
+
+	memset(&pe, 0, sizeof pe);
+	pe.dwSize = sizeof pe;
+	if (!Process32FirstW(snap, &pe))
+		return (0);
+	do {
+		if (pe.th32ProcessID == pid)
+			break;
+	} while (Process32NextW(snap, &pe));
+	if (pe.th32ProcessID != pid)
+		return (0);
+	*ppid = pe.th32ParentProcessID;
+
+	*created = 0;
+	h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+	if (h != NULL) {
+		if (GetProcessTimes(h, &ct, &x1, &x2, &x3)) {
+			*created = ((ULONGLONG)ct.dwHighDateTime << 32) |
+			    ct.dwLowDateTime;
+		}
+		CloseHandle(h);
+	}
+	return (1);
+}
+
+/*
+ * Is this client running inside one of our panes? There is no tty name to
+ * compare, so look for a pane's process among the client's ancestors. A
+ * parent created after its child is a reused ID and ends the search.
+ */
+static int
+server_client_win32_nested(struct client *c)
+{
+	struct window_pane	*wp;
+	HANDLE			 snap;
+	DWORD			 pid, ppid;
+	ULONGLONG		 created, child_created = 0;
+	int			 depth, found = 0;
+
+	if (c->pid <= 0)
+		return (0);
+	snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snap == INVALID_HANDLE_VALUE)
+		return (0);
+
+	pid = (DWORD)c->pid;
+	for (depth = 0; depth < 64 && pid != 0 && !found; depth++) {
+		if (!server_client_process_info(snap, pid, &ppid, &created))
+			break;
+		if (depth != 0 && created != 0 && child_created != 0 &&
+		    created > child_created)
+			break;
+		RB_FOREACH(wp, window_pane_tree, &all_window_panes) {
+			if (wp->pid > 0 && (DWORD)wp->pid == pid) {
+				found = 1;
+				break;
+			}
+		}
+		if (ppid == pid)
+			break;
+		child_created = created;
+		pid = ppid;
+	}
+
+	CloseHandle(snap);
+	return (found);
 }
 #endif
 
@@ -264,11 +408,16 @@ server_client_check_nested(struct client *c)
 	if (envent == NULL || *envent->value == '\0')
 		return (0);
 
+#ifdef _WIN32
+	(void)wp;
+	return (server_client_win32_nested(c));
+#else
 	RB_FOREACH(wp, window_pane_tree, &all_window_panes) {
 		if (strcmp(wp->tty, c->ttyname) == 0)
 			return (1);
 	}
 	return (0);
+#endif
 }
 
 /* Set client key table. */
@@ -2453,30 +2602,17 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 		server_client_set_session(c, NULL);
 		recalculate_sizes();
 		tty_close(&c->tty);
+#ifdef _WIN32
+		/*
+		 * The tty channel is a separate connection: end it so the
+		 * client can read everything written to it (such as the final
+		 * terminal reset) before it exits.
+		 */
+		if (c->fd != -1)
+			shutdown((SOCKET)c->fd, SD_SEND);
+#endif
 		proc_send(c->peer, MSG_EXITED, -1, NULL, 0);
 		break;
-#ifdef _WIN32
-	case MSG_WIN32_TTY_INPUT:
-		/* Client sent raw terminal input; feed into tty input buffer. */
-		if (datalen > 0 && c->tty.in != NULL)
-			evbuffer_add(c->tty.in, imsg->data, datalen);
-		break;
-	case MSG_WIN32_TTY_RESIZE:
-		/* Client reported a terminal resize. */
-		if (c->flags & CLIENT_CONTROL)
-			break;
-		server_client_update_latest(c);
-		tty_resize(&c->tty);
-		recalculate_sizes();
-		if (c->overlay_resize == NULL)
-			server_client_clear_overlay(c);
-		else
-			c->overlay_resize(c, c->overlay_data);
-		server_redraw_client(c);
-		if (c->session != NULL)
-			notify_client("client-resized", c);
-		break;
-#endif
 	case MSG_WAKEUP:
 	case MSG_UNLOCK:
 		if (datalen != 0)
@@ -2781,10 +2917,11 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 
 #ifdef _WIN32
 	/*
-	 * On Windows, tty I/O uses a separate TCP connection (tty channel).
-	 * If we haven't matched it yet, check the pending list. If still not
-	 * found, defer command processing via a blocking cmdq callback so the
-	 * TTY channel can arrive on the next event-loop iteration.
+	 * On Windows, tty I/O uses a separate TCP connection (tty channel)
+	 * which only clients on a console and control mode clients open.
+	 * Clients set it up before identifying, so it is normally matched by
+	 * now. If not, defer command processing via a blocking cmdq callback
+	 * until it arrives (or a safety-net timeout).
 	 */
 	if (c->fd == -1 && c->tty_token != NULL) {
 		int tty_fd = server_get_pending_tty(c->tty_token);
@@ -2806,17 +2943,21 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 			evtimer_add(&c->tty_wait_timer, &tv);
 		}
 	}
-#endif
-
+	if (c->fd != -1)
+		server_client_start_tty_channel(c);
+	else if ((c->flags & CLIENT_CONTROL) && c->tty_token == NULL) {
+		/* Control mode cannot work without the channel. */
+		c->flags &= ~(CLIENT_CONTROL|CLIENT_CONTROLCONTROL);
+		c->flags |= CLIENT_EXIT;
+		free(c->exit_message);
+		c->exit_message = xstrdup("control mode channel unavailable");
+	}
+#else
 	if (c->flags & CLIENT_CONTROL)
 		control_start(c);
 	else if (c->fd != -1) {
 		if (tty_init(&c->tty, c) != 0) {
-#ifdef _WIN32
-			closesocket((SOCKET)c->fd);
-#else
 			close(c->fd);
-#endif
 			c->fd = -1;
 		} else {
 			tty_resize(&c->tty);
@@ -2826,6 +2967,7 @@ server_client_dispatch_identify(struct client *c, struct imsg *imsg)
 			close(c->out_fd);
 		c->out_fd = -1;
 	}
+#endif
 
 	/* If pasting has taken too long, turn it off. */
 	if (c->flags & (CLIENT_BRACKETPASTING|CLIENT_ASSUMEPASTING) &&

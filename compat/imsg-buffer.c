@@ -728,34 +728,52 @@ msgbuf_concat(struct msgbuf *msgbuf, struct ibufqueue *from)
 	ibufq_concat(&msgbuf->bufs, from);
 }
 
+#ifdef _WIN32
+/*
+ * Windows has no writev or SCM_RIGHTS: gather up to IOV_MAX queued buffers
+ * into one WSASend, which like writev may send only part of them. Only what
+ * was actually sent is drained.
+ */
+static int
+win32_msgbuf_send(int fd, struct msgbuf *msgbuf)
+{
+	WSABUF		 bufs[IOV_MAX];
+	struct ibuf	*buf;
+	unsigned int	 i = 0;
+	DWORD		 n;
+	int		 wsa_err;
+
+	TAILQ_FOREACH(buf, &msgbuf->bufs.bufs, entry) {
+		if (i >= IOV_MAX)
+			break;
+		bufs[i].buf = ibuf_data(buf);
+		bufs[i].len = (ULONG)ibuf_size(buf);
+		i++;
+	}
+	if (i == 0)
+		return (0);	/* nothing queued */
+
+ again:
+	if (WSASend((SOCKET)fd, bufs, i, &n, 0, NULL, NULL) == SOCKET_ERROR) {
+		wsa_err = WSAGetLastError();
+		if (wsa_err == WSAEINTR)
+			goto again;
+		if (wsa_err == WSAEWOULDBLOCK || wsa_err == WSAENOBUFS)
+			/* lets retry later again */
+			return (0);
+		return (-1);
+	}
+
+	msgbuf_drain(msgbuf, n);
+	return (0);
+}
+#endif
+
 int
 ibuf_write(int fd, struct msgbuf *msgbuf)
 {
 #ifdef _WIN32
-	struct ibuf	*buf;
-	ssize_t		 n;
-	size_t		 total = 0;
-
-	TAILQ_FOREACH(buf, &msgbuf->bufs.bufs, entry) {
- again:
-		if ((n = send(fd, ibuf_data(buf), ibuf_size(buf), 0)) == -1) {
-			int wsa_err = WSAGetLastError();
-			if (wsa_err == WSAEINTR)
-				goto again;
-			if (wsa_err == WSAEWOULDBLOCK || wsa_err == WSAENOBUFS) {
-				if (total > 0)
-					break;
-				return (0);
-			}
-			return (-1);
-		}
-		total += n;
-	}
-	if (total == 0)
-		return (0);	/* nothing queued */
-
-	msgbuf_drain(msgbuf, total);
-	return (0);
+	return (win32_msgbuf_send(fd, msgbuf));
 #else
 	struct iovec	 iov[IOV_MAX];
 	struct ibuf	*buf;
@@ -792,34 +810,8 @@ int
 msgbuf_write(int fd, struct msgbuf *msgbuf)
 {
 #ifdef _WIN32
-	/*
-	 * Windows does not support sendmsg/SCM_RIGHTS fd passing.
-	 * Use simple send() calls instead.
-	 */
-	struct ibuf	*buf;
-	ssize_t		 n;
-	size_t		 total = 0;
-
-	TAILQ_FOREACH(buf, &msgbuf->bufs.bufs, entry) {
- again:
-		if ((n = send(fd, ibuf_data(buf), ibuf_size(buf), 0)) == -1) {
-			int wsa_err = WSAGetLastError();
-			if (wsa_err == WSAEINTR)
-				goto again;
-			if (wsa_err == WSAEWOULDBLOCK || wsa_err == WSAENOBUFS) {
-				if (total > 0)
-					break;
-				return (0);
-			}
-			return (-1);
-		}
-		total += n;
-	}
-	if (total == 0)
-		return (0);	/* nothing queued */
-
-	msgbuf_drain(msgbuf, total);
-	return (0);
+	/* Windows does not support sendmsg/SCM_RIGHTS fd passing. */
+	return (win32_msgbuf_send(fd, msgbuf));
 #else
 	struct iovec	 iov[IOV_MAX];
 	struct ibuf	*buf, *buf0 = NULL;
