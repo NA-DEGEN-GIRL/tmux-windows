@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "tmux-windows",
-  "version-string": "3.6a-win32",
+  "version-string": "next-3.7-win32",
   "builtin-baseline": "a0400024711b283056538ac19ced80b91a83c24c",
   "supports": "windows",
   "dependencies": [

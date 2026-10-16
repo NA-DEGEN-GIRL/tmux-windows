@@ -1,3 +1,4 @@
+/* cmd-parse.y SHA256: 5664a78bf8087d6db8f611dc6586d0467569fcb5d507d9249417815ccb860d19 */
 /* A Bison parser, made by GNU Bison 3.8.2.  */
 
 /* Bison implementation for Yacc-like parsers in C
@@ -67,7 +68,6 @@
 
 
 /* First part of user prologue.  */
-#line 19 "C:/src/tmux/cmd-parse.y"
 
 
 #include <sys/types.h>
@@ -92,6 +92,8 @@ static void printflike(1,2)	 yyerror(const char *, ...);
 
 static char			*yylex_token(int);
 static char			*yylex_format(void);
+
+#define CMD_PARSE_MAX_ENVIRON_LEN 16384
 
 struct cmd_parse_scope {
 	int				 flag;
@@ -151,9 +153,12 @@ static void	 cmd_parse_build_commands(struct cmd_parse_commands *,
 		     struct cmd_parse_input *, struct cmd_parse_result *);
 static void	 cmd_parse_print_commands(struct cmd_parse_input *,
 		     struct cmd_list *);
+#ifdef _WIN32
+static struct cmd_parse_commands *cmd_parse_do_buffer(const char *, size_t,
+		     struct cmd_parse_input *, char **);
+#endif
 
 
-#line 157 "C:/src/tmux/cmd-parse.c"
 
 # ifndef YY_CAST
 #  ifdef __cplusplus
@@ -211,7 +216,6 @@ extern int yydebug;
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
-#line 106 "C:/src/tmux/cmd-parse.y"
 
 	char					 *token;
 	struct cmd_parse_arguments		 *arguments;
@@ -224,7 +228,6 @@ union YYSTYPE
 	struct cmd_parse_commands		 *commands;
 	struct cmd_parse_command		 *command;
 
-#line 228 "C:/src/tmux/cmd-parse.c"
 
 };
 typedef union YYSTYPE YYSTYPE;
@@ -1287,53 +1290,42 @@ yyreduce:
   switch (yyn)
     {
   case 3: /* lines: statements  */
-#line 140 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state	*ps = &parse_state;
 
 			ps->commands = (yyvsp[0].commands);
 		}
-#line 1297 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 4: /* statements: statement '\n'  */
-#line 147 "C:/src/tmux/cmd-parse.y"
                 {
 			(yyval.commands) = (yyvsp[-1].commands);
 		}
-#line 1305 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 5: /* statements: statements statement '\n'  */
-#line 151 "C:/src/tmux/cmd-parse.y"
                 {
 			(yyval.commands) = (yyvsp[-2].commands);
 			TAILQ_CONCAT((yyval.commands), (yyvsp[-1].commands), entry);
 			free((yyvsp[-1].commands));
 		}
-#line 1315 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 6: /* statement: %empty  */
-#line 158 "C:/src/tmux/cmd-parse.y"
                 {
 			(yyval.commands) = xmalloc (sizeof *(yyval.commands));
 			TAILQ_INIT((yyval.commands));
 		}
-#line 1324 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 7: /* statement: hidden_assignment  */
-#line 163 "C:/src/tmux/cmd-parse.y"
                 {
 			(yyval.commands) = xmalloc (sizeof *(yyval.commands));
 			TAILQ_INIT((yyval.commands));
 		}
-#line 1333 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 8: /* statement: condition  */
-#line 168 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state	*ps = &parse_state;
 
@@ -1344,11 +1336,9 @@ yyreduce:
 				cmd_parse_free_commands((yyvsp[0].commands));
 			}
 		}
-#line 1348 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 9: /* statement: commands  */
-#line 179 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state	*ps = &parse_state;
 
@@ -1359,27 +1349,21 @@ yyreduce:
 				cmd_parse_free_commands((yyvsp[0].commands));
 			}
 		}
-#line 1363 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 10: /* format: FORMAT  */
-#line 191 "C:/src/tmux/cmd-parse.y"
                 {
 			(yyval.token) = (yyvsp[0].token);
 		}
-#line 1371 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 11: /* format: TOKEN  */
-#line 195 "C:/src/tmux/cmd-parse.y"
                 {
 			(yyval.token) = (yyvsp[0].token);
 		}
-#line 1379 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 12: /* expanded: format  */
-#line 200 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state	*ps = &parse_state;
 			struct cmd_parse_input	*pi = ps->input;
@@ -1402,11 +1386,9 @@ yyreduce:
 			format_free(ft);
 			free((yyvsp[0].token));
 		}
-#line 1406 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 15: /* assignment: EQUALS  */
-#line 227 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state	*ps = &parse_state;
 			int			 flags = ps->input->flags;
@@ -1419,15 +1401,17 @@ yyreduce:
 					flag = flag && scope->flag;
 			}
 
+			if (strlen((yyvsp[0].token)) > CMD_PARSE_MAX_ENVIRON_LEN) {
+				yyerror("environment variable is too long");
+				YYABORT;
+			}
 			if ((~flags & CMD_PARSE_PARSEONLY) && flag)
 				environ_put(global_environ, (yyvsp[0].token), 0);
 			free((yyvsp[0].token));
 		}
-#line 1427 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 16: /* hidden_assignment: HIDDEN EQUALS  */
-#line 245 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state	*ps = &parse_state;
 			int			 flags = ps->input->flags;
@@ -1440,15 +1424,17 @@ yyreduce:
 					flag = flag && scope->flag;
 			}
 
+			if (strlen((yyvsp[0].token)) > CMD_PARSE_MAX_ENVIRON_LEN) {
+				yyerror("environment variable is too long");
+				YYABORT;
+			}
 			if ((~flags & CMD_PARSE_PARSEONLY) && flag)
 				environ_put(global_environ, (yyvsp[0].token), ENVIRON_HIDDEN);
 			free((yyvsp[0].token));
 		}
-#line 1448 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 17: /* if_open: IF expanded  */
-#line 263 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state	*ps = &parse_state;
 			struct cmd_parse_scope	*scope;
@@ -1461,11 +1447,9 @@ yyreduce:
 				TAILQ_INSERT_HEAD(&ps->stack, ps->scope, entry);
 			ps->scope = scope;
 		}
-#line 1465 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 18: /* if_else: ELSE  */
-#line 277 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state	*ps = &parse_state;
 			struct cmd_parse_scope	*scope;
@@ -1476,11 +1460,9 @@ yyreduce:
 			free(ps->scope);
 			ps->scope = scope;
 		}
-#line 1480 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 19: /* if_elif: ELIF expanded  */
-#line 289 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state	*ps = &parse_state;
 			struct cmd_parse_scope	*scope;
@@ -1492,11 +1474,9 @@ yyreduce:
 			free(ps->scope);
 			ps->scope = scope;
 		}
-#line 1496 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 20: /* if_close: ENDIF  */
-#line 302 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state	*ps = &parse_state;
 
@@ -1505,11 +1485,9 @@ yyreduce:
 			if (ps->scope != NULL)
 				TAILQ_REMOVE(&ps->stack, ps->scope, entry);
 		}
-#line 1509 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 21: /* condition: if_open '\n' statements if_close  */
-#line 312 "C:/src/tmux/cmd-parse.y"
                 {
 			if ((yyvsp[-3].flag))
 				(yyval.commands) = (yyvsp[-1].commands);
@@ -1518,11 +1496,9 @@ yyreduce:
 				cmd_parse_free_commands((yyvsp[-1].commands));
 			}
 		}
-#line 1522 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 22: /* condition: if_open '\n' statements if_else '\n' statements if_close  */
-#line 321 "C:/src/tmux/cmd-parse.y"
                 {
 			if ((yyvsp[-6].flag)) {
 				(yyval.commands) = (yyvsp[-4].commands);
@@ -1532,11 +1508,9 @@ yyreduce:
 				cmd_parse_free_commands((yyvsp[-4].commands));
 			}
 		}
-#line 1536 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 23: /* condition: if_open '\n' statements elif if_close  */
-#line 331 "C:/src/tmux/cmd-parse.y"
                 {
 			if ((yyvsp[-4].flag)) {
 				(yyval.commands) = (yyvsp[-2].commands);
@@ -1550,11 +1524,9 @@ yyreduce:
 				cmd_parse_free_commands((yyvsp[-1].elif).commands);
 			}
 		}
-#line 1554 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 24: /* condition: if_open '\n' statements elif if_else '\n' statements if_close  */
-#line 345 "C:/src/tmux/cmd-parse.y"
                 {
 			if ((yyvsp[-7].flag)) {
 				(yyval.commands) = (yyvsp[-5].commands);
@@ -1570,11 +1542,9 @@ yyreduce:
 				cmd_parse_free_commands((yyvsp[-4].elif).commands);
 			}
 		}
-#line 1574 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 25: /* elif: if_elif '\n' statements  */
-#line 362 "C:/src/tmux/cmd-parse.y"
                 {
 			if ((yyvsp[-2].flag)) {
 				(yyval.elif).flag = 1;
@@ -1585,11 +1555,9 @@ yyreduce:
 				cmd_parse_free_commands((yyvsp[0].commands));
 			}
 		}
-#line 1589 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 26: /* elif: if_elif '\n' statements elif  */
-#line 373 "C:/src/tmux/cmd-parse.y"
                 {
 			if ((yyvsp[-3].flag)) {
 				(yyval.elif).flag = 1;
@@ -1606,11 +1574,9 @@ yyreduce:
 				cmd_parse_free_commands((yyvsp[0].elif).commands);
 			}
 		}
-#line 1610 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 27: /* commands: command  */
-#line 391 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state	*ps = &parse_state;
 
@@ -1621,29 +1587,23 @@ yyreduce:
 			else
 				cmd_parse_free_command((yyvsp[0].command));
 		}
-#line 1625 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 28: /* commands: commands ';'  */
-#line 402 "C:/src/tmux/cmd-parse.y"
                 {
 			(yyval.commands) = (yyvsp[-1].commands);
 		}
-#line 1633 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 29: /* commands: commands ';' condition1  */
-#line 406 "C:/src/tmux/cmd-parse.y"
                 {
 			(yyval.commands) = (yyvsp[-2].commands);
 			TAILQ_CONCAT((yyval.commands), (yyvsp[0].commands), entry);
 			free((yyvsp[0].commands));
 		}
-#line 1643 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 30: /* commands: commands ';' command  */
-#line 412 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state	*ps = &parse_state;
 
@@ -1657,19 +1617,15 @@ yyreduce:
 				cmd_parse_free_command((yyvsp[0].command));
 			}
 		}
-#line 1661 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 31: /* commands: condition1  */
-#line 426 "C:/src/tmux/cmd-parse.y"
                 {
 			(yyval.commands) = (yyvsp[0].commands);
 		}
-#line 1669 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 32: /* command: assignment  */
-#line 431 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state	*ps = &parse_state;
 
@@ -1677,11 +1633,9 @@ yyreduce:
 			(yyval.command)->line = ps->input->line;
 			TAILQ_INIT(&(yyval.command)->arguments);
 		}
-#line 1681 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 33: /* command: optional_assignment TOKEN  */
-#line 439 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state		*ps = &parse_state;
 			struct cmd_parse_argument	*arg;
@@ -1695,11 +1649,9 @@ yyreduce:
 			arg->string = (yyvsp[0].token);
 			TAILQ_INSERT_HEAD(&(yyval.command)->arguments, arg, entry);
 		}
-#line 1699 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 34: /* command: optional_assignment TOKEN arguments  */
-#line 453 "C:/src/tmux/cmd-parse.y"
                 {
 			struct cmd_parse_state		*ps = &parse_state;
 			struct cmd_parse_argument	*arg;
@@ -1716,11 +1668,9 @@ yyreduce:
 			arg->string = (yyvsp[-1].token);
 			TAILQ_INSERT_HEAD(&(yyval.command)->arguments, arg, entry);
 		}
-#line 1720 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 35: /* condition1: if_open commands if_close  */
-#line 471 "C:/src/tmux/cmd-parse.y"
                 {
 			if ((yyvsp[-2].flag))
 				(yyval.commands) = (yyvsp[-1].commands);
@@ -1729,11 +1679,9 @@ yyreduce:
 				cmd_parse_free_commands((yyvsp[-1].commands));
 			}
 		}
-#line 1733 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 36: /* condition1: if_open commands if_else commands if_close  */
-#line 480 "C:/src/tmux/cmd-parse.y"
                 {
 			if ((yyvsp[-4].flag)) {
 				(yyval.commands) = (yyvsp[-3].commands);
@@ -1743,11 +1691,9 @@ yyreduce:
 				cmd_parse_free_commands((yyvsp[-3].commands));
 			}
 		}
-#line 1747 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 37: /* condition1: if_open commands elif1 if_close  */
-#line 490 "C:/src/tmux/cmd-parse.y"
                 {
 			if ((yyvsp[-3].flag)) {
 				(yyval.commands) = (yyvsp[-2].commands);
@@ -1761,11 +1707,9 @@ yyreduce:
 				cmd_parse_free_commands((yyvsp[-1].elif).commands);
 			}
 		}
-#line 1765 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 38: /* condition1: if_open commands elif1 if_else commands if_close  */
-#line 504 "C:/src/tmux/cmd-parse.y"
                 {
 			if ((yyvsp[-5].flag)) {
 				(yyval.commands) = (yyvsp[-4].commands);
@@ -1781,11 +1725,9 @@ yyreduce:
 				cmd_parse_free_commands((yyvsp[-3].elif).commands);
 			}
 		}
-#line 1785 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 39: /* elif1: if_elif commands  */
-#line 521 "C:/src/tmux/cmd-parse.y"
                 {
 			if ((yyvsp[-1].flag)) {
 				(yyval.elif).flag = 1;
@@ -1796,11 +1738,9 @@ yyreduce:
 				cmd_parse_free_commands((yyvsp[0].commands));
 			}
 		}
-#line 1800 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 40: /* elif1: if_elif commands elif1  */
-#line 532 "C:/src/tmux/cmd-parse.y"
                 {
 			if ((yyvsp[-2].flag)) {
 				(yyval.elif).flag = 1;
@@ -1817,79 +1757,63 @@ yyreduce:
 				cmd_parse_free_commands((yyvsp[0].elif).commands);
 			}
 		}
-#line 1821 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 41: /* arguments: argument  */
-#line 550 "C:/src/tmux/cmd-parse.y"
                 {
 			(yyval.arguments) = xcalloc(1, sizeof *(yyval.arguments));
 			TAILQ_INIT((yyval.arguments));
 
 			TAILQ_INSERT_HEAD((yyval.arguments), (yyvsp[0].argument), entry);
 		}
-#line 1832 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 42: /* arguments: argument arguments  */
-#line 557 "C:/src/tmux/cmd-parse.y"
                 {
 			TAILQ_INSERT_HEAD((yyvsp[0].arguments), (yyvsp[-1].argument), entry);
 			(yyval.arguments) = (yyvsp[0].arguments);
 		}
-#line 1841 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 43: /* argument: TOKEN  */
-#line 563 "C:/src/tmux/cmd-parse.y"
                 {
 			(yyval.argument) = xcalloc(1, sizeof *(yyval.argument));
 			(yyval.argument)->type = CMD_PARSE_STRING;
 			(yyval.argument)->string = (yyvsp[0].token);
 		}
-#line 1851 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 44: /* argument: EQUALS  */
-#line 569 "C:/src/tmux/cmd-parse.y"
                 {
 			(yyval.argument) = xcalloc(1, sizeof *(yyval.argument));
 			(yyval.argument)->type = CMD_PARSE_STRING;
 			(yyval.argument)->string = (yyvsp[0].token);
 		}
-#line 1861 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 45: /* argument: '{' argument_statements  */
-#line 575 "C:/src/tmux/cmd-parse.y"
                 {
 			(yyval.argument) = xcalloc(1, sizeof *(yyval.argument));
 			(yyval.argument)->type = CMD_PARSE_COMMANDS;
 			(yyval.argument)->commands = (yyvsp[0].commands);
 		}
-#line 1871 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 46: /* argument_statements: statement '}'  */
-#line 582 "C:/src/tmux/cmd-parse.y"
                         {
 				(yyval.commands) = (yyvsp[-1].commands);
 			}
-#line 1879 "C:/src/tmux/cmd-parse.c"
     break;
 
   case 47: /* argument_statements: statements statement '}'  */
-#line 586 "C:/src/tmux/cmd-parse.y"
                         {
 				(yyval.commands) = (yyvsp[-2].commands);
 				TAILQ_CONCAT((yyval.commands), (yyvsp[-1].commands), entry);
 				free((yyvsp[-1].commands));
 			}
-#line 1889 "C:/src/tmux/cmd-parse.c"
     break;
 
 
-#line 1893 "C:/src/tmux/cmd-parse.c"
 
       default: break;
     }
@@ -2082,7 +2006,6 @@ yyreturnlab:
   return yyresult;
 }
 
-#line 592 "C:/src/tmux/cmd-parse.y"
 
 
 static char *
@@ -2197,12 +2120,32 @@ cmd_parse_run_parser(char **cause)
 static struct cmd_parse_commands *
 cmd_parse_do_file(FILE *f, struct cmd_parse_input *pi, char **cause)
 {
+#ifdef _WIN32
+	struct cmd_parse_commands	*cmds;
+	char				*buf = NULL;
+	size_t				 len = 0, n;
+
+	/*
+	 * Parse the file from memory, where yylex_getc1 can treat \r\n as \n
+	 * without pushing back more than one character: configuration files
+	 * written on Windows usually have CRLF line endings.
+	 */
+	do {
+		buf = xrealloc(buf, len + BUFSIZ);
+		n = fread(buf + len, 1, BUFSIZ, f);
+		len += n;
+	} while (n == BUFSIZ);
+	cmds = cmd_parse_do_buffer(buf, len, pi, cause);
+	free(buf);
+	return (cmds);
+#else
 	struct cmd_parse_state	*ps = &parse_state;
 
 	memset(ps, 0, sizeof *ps);
 	ps->input = pi;
 	ps->f = f;
 	return (cmd_parse_run_parser(cause));
+#endif
 }
 
 static struct cmd_parse_commands *
@@ -2210,6 +2153,14 @@ cmd_parse_do_buffer(const char *buf, size_t len, struct cmd_parse_input *pi,
     char **cause)
 {
 	struct cmd_parse_state	*ps = &parse_state;
+
+#ifdef _WIN32
+	/* Skip the UTF-8 byte order mark many Windows editors write. */
+	if (len >= 3 && memcmp(buf, "\357\273\277", 3) == 0) {
+		buf += 3;
+		len -= 3;
+	}
+#endif
 
 	memset(ps, 0, sizeof *ps);
 	ps->input = pi;
@@ -2680,6 +2631,12 @@ yylex_getc1(void)
 			ch = EOF;
 		else
 			ch = ps->buf[ps->off++];
+#ifdef _WIN32
+		/* Treat \r\n as \n, so CRLF files parse like LF files. */
+		if (ch == '\r' && ps->off != ps->len &&
+		    ps->buf[ps->off] == '\n')
+			ch = ps->buf[ps->off++];
+#endif
 	}
 	return (ch);
 }
@@ -3107,7 +3064,9 @@ yylex_token_tilde(char **buf, size_t *len)
 
 	if (*name == '\0') {
 		envent = environ_find(global_environ, "HOME");
-		if (envent != NULL && *envent->value != '\0')
+		if (envent != NULL &&
+		    envent->value != NULL &&
+		    *envent->value != '\0')
 			home = envent->value;
 		else if ((pw = getpwuid(getuid())) != NULL)
 			home = pw->pw_dir;

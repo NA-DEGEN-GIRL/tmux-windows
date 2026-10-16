@@ -504,6 +504,7 @@ main(int argc, char **argv)
 	_CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
 	win32_text_init(&argc, &argv, log_debug);
 	win32_init_environ();
+	win32_utf8_main_args(&argc, &argv);
 	win32_wsa_init();
 	win32_process_init();
 	win32_tty_init_utf8();

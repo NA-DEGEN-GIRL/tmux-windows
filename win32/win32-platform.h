@@ -1175,4 +1175,10 @@ int	 win32_socket_drained(int);
 /* job.c */
 struct win32_pty *job_get_pty(struct job *);
 
+/*
+ * Batch D: UTF-8 argv and environment for Windows versions that ignore the
+ * manifest's UTF-8 code page (osdep-windows.c).
+ */
+void win32_utf8_main_args(int *, char ***);
+
 #endif /* WIN32_PLATFORM_H */

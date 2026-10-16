@@ -101,6 +101,10 @@ static void	 cmd_parse_build_commands(struct cmd_parse_commands *,
 		     struct cmd_parse_input *, struct cmd_parse_result *);
 static void	 cmd_parse_print_commands(struct cmd_parse_input *,
 		     struct cmd_list *);
+#ifdef _WIN32
+static struct cmd_parse_commands *cmd_parse_do_buffer(const char *, size_t,
+		     struct cmd_parse_input *, char **);
+#endif
 
 %}
 
@@ -713,12 +717,32 @@ cmd_parse_run_parser(char **cause)
 static struct cmd_parse_commands *
 cmd_parse_do_file(FILE *f, struct cmd_parse_input *pi, char **cause)
 {
+#ifdef _WIN32
+	struct cmd_parse_commands	*cmds;
+	char				*buf = NULL;
+	size_t				 len = 0, n;
+
+	/*
+	 * Parse the file from memory, where yylex_getc1 can treat \r\n as \n
+	 * without pushing back more than one character: configuration files
+	 * written on Windows usually have CRLF line endings.
+	 */
+	do {
+		buf = xrealloc(buf, len + BUFSIZ);
+		n = fread(buf + len, 1, BUFSIZ, f);
+		len += n;
+	} while (n == BUFSIZ);
+	cmds = cmd_parse_do_buffer(buf, len, pi, cause);
+	free(buf);
+	return (cmds);
+#else
 	struct cmd_parse_state	*ps = &parse_state;
 
 	memset(ps, 0, sizeof *ps);
 	ps->input = pi;
 	ps->f = f;
 	return (cmd_parse_run_parser(cause));
+#endif
 }
 
 static struct cmd_parse_commands *
@@ -726,6 +750,14 @@ cmd_parse_do_buffer(const char *buf, size_t len, struct cmd_parse_input *pi,
     char **cause)
 {
 	struct cmd_parse_state	*ps = &parse_state;
+
+#ifdef _WIN32
+	/* Skip the UTF-8 byte order mark many Windows editors write. */
+	if (len >= 3 && memcmp(buf, "\357\273\277", 3) == 0) {
+		buf += 3;
+		len -= 3;
+	}
+#endif
 
 	memset(ps, 0, sizeof *ps);
 	ps->input = pi;
@@ -1196,6 +1228,12 @@ yylex_getc1(void)
 			ch = EOF;
 		else
 			ch = ps->buf[ps->off++];
+#ifdef _WIN32
+		/* Treat \r\n as \n, so CRLF files parse like LF files. */
+		if (ch == '\r' && ps->off != ps->len &&
+		    ps->buf[ps->off] == '\n')
+			ch = ps->buf[ps->off++];
+#endif
 	}
 	return (ch);
 }

@@ -42,7 +42,7 @@ tmux kill-session -t work
 
 ### 요구 사항
 
-- Windows 10 1809 이상
+- Windows 10 1903 이상 권장 (1809에서도 동작하지만 경로에 한글 등 ANSI 코드 페이지 밖의 문자가 있으면 안 됩니다)
 - Windows Terminal 권장
 - 로컬 빌드 시 Visual Studio Build Tools 또는 MSVC/clang-cl
 - CMake
@@ -50,36 +50,40 @@ tmux kill-session -t work
 
 ### 빌드
 
-환경에 따라 vcpkg toolchain 경로는 조정해야 합니다.
+가장 간단한 방법은 설치 스크립트가 Release 빌드까지 하게 하는 것입니다 (아래 설치 참고). 직접 빌드하려면 "x64 Native Tools" 프롬프트에서 (환경에 따라 vcpkg toolchain 경로는 조정):
 
 ```powershell
-cmake -S . -B build\win32 -G Ninja `
+# Release: build\release\tmux.exe
+cmake -S . -B build\release -G Ninja -DCMAKE_BUILD_TYPE=Release `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
   -DVCPKG_TARGET_TRIPLET=x64-windows-static
+cmake --build build\release
 
-cmake --build build\win32 --config Debug
+# Debug: build\win32\tmux.exe
+cmake -S . -B build\win32 -G Ninja -DCMAKE_BUILD_TYPE=Debug `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+  -DVCPKG_TARGET_TRIPLET=x64-windows-static
+cmake --build build\win32
 ctest --test-dir build\win32 --output-on-failure
 ```
 
-빌드 결과물:
-
-```text
-build\win32\tmux.exe
-```
+Ninja는 `--config`를 무시하므로 빌드 종류는 `-DCMAKE_BUILD_TYPE`으로 정합니다.
 
 ### 설치
 
 로컬 빌드 결과를 사용자 PATH에 설치하려면:
 
 ```powershell
-.\install-user.ps1
+.\install-user.ps1 -Build    # Release 빌드 후 설치
+.\install-user.ps1           # 이미 있는 build\release\tmux.exe 설치
+.\install-user.ps1 -DryRun   # 실제로 바꾸지 않고 할 일만 표시
 ```
 
 이 스크립트는 다음을 수행합니다.
 
-- `build\win32\tmux.exe`를 `%LOCALAPPDATA%\tmux-windows\bin\tmux.exe`로 복사
-- 해당 디렉터리를 User PATH에 추가
-- 오래된 tmux 서버/세션 찌꺼기로 새 클라이언트가 잘못 붙는 문제를 막기 위해 기존 native tmux 서버를 먼저 종료
+- `build\release\tmux.exe`를 `%LOCALAPPDATA%\tmux-windows\bin\tmux.exe`로 복사 (`-InstallDir`로 변경 가능)
+- 해당 디렉터리를 User PATH에 추가 (레지스트리 값의 `%VAR%` 항목과 형식은 그대로 유지, `-NoPathUpdate`로 생략 가능)
+- 교체되는 `tmux.exe`로 실행 중인 서버를 모든 `-L` label에 대해 먼저 종료 (다른 tmux.exe로 실행한 서버는 건드리지 않음)
 
 현재 세션을 일부러 유지하고 싶다면:
 
@@ -87,7 +91,7 @@ build\win32\tmux.exe
 .\install-user.ps1 -KeepSessions
 ```
 
-단, 실행 중인 서버가 있으면 Windows가 `tmux.exe` 교체를 막을 수 있습니다.
+이 경우 실행 중인 예전 `tmux.exe`는 옆으로 옮겨 두고 새 파일을 설치합니다.
 
 ### 기본 사용법
 
@@ -182,7 +186,7 @@ Currently verified:
 
 ### Requirements
 
-- Windows 10 version 1809 or newer
+- Windows 10 version 1903 or newer recommended (1809 works, but paths must then be representable in the ANSI code page)
 - Windows Terminal recommended
 - Visual Studio Build Tools or MSVC/clang-cl for local builds
 - CMake
@@ -190,36 +194,42 @@ Currently verified:
 
 ### Build
 
-Adjust the vcpkg toolchain path for your environment.
+The simplest way is to let the installer build Release (see below). To build
+by hand, from an "x64 Native Tools" prompt (adjust the vcpkg toolchain path
+for your environment):
 
 ```powershell
-cmake -S . -B build\win32 -G Ninja `
+# Release: build\release\tmux.exe
+cmake -S . -B build\release -G Ninja -DCMAKE_BUILD_TYPE=Release `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
   -DVCPKG_TARGET_TRIPLET=x64-windows-static
+cmake --build build\release
 
-cmake --build build\win32 --config Debug
+# Debug: build\win32\tmux.exe
+cmake -S . -B build\win32 -G Ninja -DCMAKE_BUILD_TYPE=Debug `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+  -DVCPKG_TARGET_TRIPLET=x64-windows-static
+cmake --build build\win32
 ctest --test-dir build\win32 --output-on-failure
 ```
 
-The expected local binary is:
-
-```text
-build\win32\tmux.exe
-```
+Ninja ignores `--config`; the build type comes from `-DCMAKE_BUILD_TYPE`.
 
 ### Install For The Current User
 
 ```powershell
-.\install-user.ps1
+.\install-user.ps1 -Build    # build Release, then install
+.\install-user.ps1           # install an existing build\release\tmux.exe
+.\install-user.ps1 -DryRun   # show what would be done
 ```
 
 The installer:
 
-- copies `build\win32\tmux.exe` to `%LOCALAPPDATA%\tmux-windows\bin\tmux.exe`
-- adds that directory to the User PATH
-- stops existing native tmux servers first, so new clients do not attach to stale servers from an older binary
+- copies `build\release\tmux.exe` to `%LOCALAPPDATA%\tmux-windows\bin\tmux.exe` (`-InstallDir` to change)
+- adds that directory to the User PATH, keeping existing `%VAR%` entries and the value type (`-NoPathUpdate` to skip)
+- stops the servers running from the `tmux.exe` it replaces, whatever their `-L` label, so new clients do not attach to a server from an older binary; servers from other tmux copies are left alone
 
-Use `-KeepSessions` only when you intentionally want to keep existing sessions:
+Use `-KeepSessions` only when you intentionally want to keep existing sessions; the running `tmux.exe` is then moved aside:
 
 ```powershell
 .\install-user.ps1 -KeepSessions

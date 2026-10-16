@@ -2,16 +2,22 @@
 
 # Windows port of upstream format-strings.sh.
 # Tests format string expansion as described in tmux(1) FORMATS.
-# Covers: plain strings, escapes, simple expansion, conditionals,
-# boolean ops, comparisons, nested conditionals, and literal mode.
+# Covers: plain strings, escapes, substitutions, simple expansion,
+# conditionals, boolean ops, comparisons, nested conditionals, literal mode
+# and #() format jobs. Each test_format is one assertion and each
+# test_conditional_* is two.
 
 PATH=/bin:/usr/bin
 TERM=screen
 
+# Formats such as #{s/#:/_/:@v} look like path lists to Git Bash, which
+# would rewrite them before tmux sees them.
+MSYS_NO_PATHCONV=1
+export MSYS_NO_PATHCONV
+
 [ -z "$TEST_TMUX" ] && TEST_TMUX=$(readlink -f ../tmux)
-TMUX="$TEST_TMUX -L${TMUX_TEST_LABEL:-test}"
+TMUX="$TEST_TMUX -L${TMUX_TEST_LABEL:-regress-format-strings}"
 $TMUX kill-server 2>/dev/null
-sleep 1
 
 FNULL="-fNUL"
 
@@ -61,7 +67,6 @@ test_conditional_with_session_name()
 trap "$TMUX kill-server 2>/dev/null" 0 1 15
 
 $TMUX $FNULL new-session -d || exit 1
-sleep 1
 
 # used later in conditionals
 $TMUX rename-session "Summer" || exit 1
@@ -69,6 +74,7 @@ $TMUX set @true 1 || exit 1
 $TMUX set @false 0 || exit 1
 $TMUX set @warm Summer || exit 1
 $TMUX set @cold Winter || exit 1
+$TMUX set @v 'foo:bar' || exit 1
 
 # Plain string without substitutions
 test_format "abc xyz" "abc xyz"
@@ -76,6 +82,8 @@ test_format "abc xyz" "abc xyz"
 # Basic escapes for "#", "{", "#{" "}", "#}", ","
 test_format "##" "#"
 test_format "#," ","
+test_format "#{s/#:/_/:@v}" "foo_bar"
+test_format "#{s/o/#:/:@v}" "f:::bar"
 test_format "{" "{"
 test_format "##{" "#{"
 test_format "#}" "}"
@@ -127,11 +135,6 @@ test_conditional_with_pane_in_mode "#{?pane_in_mode,(abc#,xyz),bonus}" "(abc,xyz
 test_conditional_with_pane_in_mode "#{?pane_in_mode,[abc,xyz],bonus}" "[abc" ""
 test_conditional_with_pane_in_mode "#{?pane_in_mode,[abc#,xyz],bonus}" "[abc,xyz]" "bonus"
 
-# Skipped: #() command substitution tests depend on Unix shell (cmd.exe on Windows).
-# test_format "#{?pane_in_mode,#(echo #,),xyz}" "xyz"
-# test_conditional_with_pane_in_mode "#{?pane_in_mode,#(echo #,),xyz}" "" "xyz"
-# test_conditional_with_pane_in_mode "#{?pane_in_mode,#(echo ,)xyz}" "" ")xyz"
-
 # Escape comma inside of #[...]
 test_conditional_with_pane_in_mode "#{?pane_in_mode,#[fg=default#,bg=default]abc,xyz}" "#[fg=default,bg=default]abc" "xyz"
 test_conditional_with_pane_in_mode "#{?pane_in_mode,#[fg=default,bg=default]abc}" "#[fg=default" "bg=default]abc"
@@ -148,9 +151,6 @@ test_conditional_with_pane_in_mode "#{?pane_in_mode,#{?#{==:#{session_name},Summ
 test_conditional_with_session_name "#{?pane_in_mode,#{?#{==:#{session_name},Summer},ABC,XYZ},xyz}" "xyz" "xyz"
 test_conditional_with_pane_in_mode "#{?pane_in_mode,abc,#{?#{==:#{session_name},Summer},ABC,XYZ}}" "abc" "ABC"
 test_conditional_with_session_name "#{?pane_in_mode,abc,#{?#{==:#{session_name},Summer},ABC,XYZ}}" "ABC" "XYZ"
-
-# Skipped: fancy stacking test uses #() which depends on Unix shell.
-# test_conditional_with_pane_in_mode "#{?#{==:#{?pane_in_mode,#{session_name},#(echo Spring)},Summer},abc,xyz}" "abc" "xyz"
 
 # Boolean expressions: "0" and "" are false, everything else is true
 test_format "#{!!:0}" "0"
@@ -197,6 +197,16 @@ test_format "#{l:#{?pane_in_mode,#{?#{==:#{session_name},Summer},ABC,XYZ},xyz}}"
 # Literal with escapes
 test_format "#{l:##{}" "#{"
 test_format "#{l:#{#}}}" "#{#}}"
+
+# #() runs a command through default-shell (cmd.exe here) as a job; the
+# first expansion is empty until the job has finished, as upstream. These
+# come last because a server that cannot run jobs fails here.
+test_format "#{?pane_in_mode,#(echo #,),xyz}" "xyz"
+test_conditional_with_pane_in_mode "#{?pane_in_mode,#(echo #,),xyz}" "" "xyz"
+test_conditional_with_pane_in_mode "#{?pane_in_mode,#(echo ,)xyz}" "" ")xyz"
+# Fancy one: a job inside a comparison inside a conditional.
+test_conditional_with_pane_in_mode "#{?#{==:#{?pane_in_mode,#{session_name},#(echo Spring)},Summer},abc,xyz}" "abc" "xyz"
+$TMUX has || { echo "Server died running format jobs."; exit 1; }
 
 echo "ALL FORMAT TESTS PASSED"
 exit 0

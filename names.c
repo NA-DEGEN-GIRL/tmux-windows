@@ -27,13 +27,53 @@
 
 #include "tmux.h"
 
-static void	 name_time_callback(int, short, void *);
+static void	 name_time_callback(evutil_socket_t, short, void *);
 static int	 name_time_expired(struct window *, struct timeval *);
 
 static char	*format_window_name(struct window *);
 
+#ifdef _WIN32
+/*
+ * A Windows pane gives no sign when its foreground process changes without
+ * output: MSYS2 bash forks and execs a command well after echoing it, so the
+ * check made for the echo may still see bash. While any window has
+ * automatic-rename on, check all of them again every this many seconds. One
+ * timer for every window means one look at the process table per interval,
+ * and leaves each window's own timer free for the usual rate limit.
+ */
+#define NAME_RECHECK_INTERVAL 1
+
+static struct event	name_recheck_event;
+
 static void
-name_time_callback(__unused int fd, __unused short events, void *arg)
+name_recheck_callback(__unused evutil_socket_t fd, __unused short events,
+    __unused void *arg)
+{
+	struct window	*w;
+
+	/* The event loop will call check_window_name for us on the way out. */
+	RB_FOREACH(w, windows, &windows) {
+		if (w->active != NULL &&
+		    options_get_number(w->options, "automatic-rename"))
+			w->active->flags |= PANE_CHANGED;
+	}
+}
+
+static void
+name_recheck_queue(void)
+{
+	struct timeval	tv = { NAME_RECHECK_INTERVAL, 0 };
+
+	if (!event_initialized(&name_recheck_event))
+		evtimer_set(&name_recheck_event, name_recheck_callback, NULL);
+	if (!evtimer_pending(&name_recheck_event, NULL))
+		evtimer_add(&name_recheck_event, &tv);
+}
+#endif
+
+static void
+name_time_callback(__unused evutil_socket_t fd, __unused short events,
+    void *arg)
 {
 	struct window	*w = arg;
 
@@ -64,6 +104,9 @@ check_window_name(struct window *w)
 
 	if (!options_get_number(w->options, "automatic-rename"))
 		return;
+#ifdef _WIN32
+	name_recheck_queue();
+#endif
 
 	if (~w->active->flags & PANE_CHANGED) {
 		log_debug("@%u active pane not changed", w->id);
@@ -141,30 +184,88 @@ format_window_name(struct window *w)
 }
 
 #ifdef _WIN32
-/*
- * For an unquoted absolute Windows path, return the end of the executable
- * name: the first space after a .exe/.com/.bat/.cmd component, so spaces in
- * directory names are kept. Returns NULL if this is not such a path.
- */
-static char *
-parse_window_name_win32_end(char *name)
+/* Does the first len bytes of name end with an executable extension? */
+static int
+parse_window_name_win32_ext(const char *name, size_t len)
 {
 	static const char	*exts[] = { ".exe", ".com", ".bat", ".cmd" };
-	char			*ptr;
 	u_int			 i;
 
-	if (!(isalpha((u_char)name[0]) && name[1] == ':') &&
-	    strncmp(name, "\\\\", 2) != 0)
-		return (NULL);
-	for (ptr = strchr(name, ' '); ptr != NULL; ptr = strchr(ptr + 1, ' ')) {
-		if (ptr - name < 4)
-			continue;
-		for (i = 0; i < nitems(exts); i++) {
-			if (strncasecmp(ptr - 4, exts[i], 4) == 0)
-				return (ptr);
-		}
+	if (len < 4)
+		return (0);
+	for (i = 0; i < nitems(exts); i++) {
+		if (strncasecmp(name + len - 4, exts[i], 4) == 0)
+			return (1);
 	}
-	return (NULL);
+	return (0);
+}
+
+/*
+ * Remove the quotes args_escape() puts around an argument containing spaces
+ * or quotes, undoing its backslash escapes. Anything after the closing quote
+ * (the remaining arguments) is dropped.
+ */
+static char *
+parse_window_name_win32_unquote(char *name)
+{
+	char	 quote = *name, *in, *out;
+
+	if (quote != '"' && quote != '\'')
+		return (name);
+	name++;
+	for (in = out = name; *in != '\0' && *in != quote; in++) {
+		if (in[0] == '\\' && in[1] != '\0' &&
+		    strchr(quote == '"' ? "\\\"$`" : "\\", in[1]) != NULL)
+			in++;
+		*out++ = *in;
+	}
+	*out = '\0';
+	return (name);
+}
+
+/*
+ * Find the program in a Windows command line or path. The program may be
+ * quoted ("C:\Program Files\Git\bin\bash.exe" -l) or, as with a shell path
+ * or a single argument, an unquoted path containing spaces.
+ */
+static char *
+parse_window_name_win32(char *name)
+{
+	char	*ptr;
+
+	name = parse_window_name_win32_unquote(name);
+
+	if (strncmp(name, "exec ", (sizeof "exec ") - 1) == 0)
+		name = name + (sizeof "exec ") - 1;
+	while (*name == ' ' || *name == '-')
+		name++;
+
+	if (*name == '"') {
+		name++;
+		name[strcspn(name, "\"")] = '\0';
+		return (name);
+	}
+
+	/*
+	 * In an unquoted absolute path, the program ends at the first space
+	 * after an executable extension, or is the whole string if it ends
+	 * with one.
+	 */
+	if ((isalpha((u_char)name[0]) && name[1] == ':') ||
+	    strncmp(name, "\\\\", 2) == 0) {
+		for (ptr = strchr(name, ' '); ptr != NULL;
+		    ptr = strchr(ptr + 1, ' ')) {
+			if (parse_window_name_win32_ext(name, ptr - name)) {
+				*ptr = '\0';
+				return (name);
+			}
+		}
+		if (parse_window_name_win32_ext(name, strlen(name)))
+			return (name);
+	}
+	if ((ptr = strchr(name, ' ')) != NULL)
+		*ptr = '\0';
+	return (name);
 }
 #endif
 
@@ -174,6 +275,9 @@ parse_window_name(const char *in)
 	char	*copy, *name, *ptr;
 
 	name = copy = xstrdup(in);
+#ifdef _WIN32
+	name = parse_window_name_win32(name);
+#else
 	if (*name == '"')
 		name++;
 	name[strcspn(name, "\"")] = '\0';
@@ -183,14 +287,9 @@ parse_window_name(const char *in)
 
 	while (*name == ' ' || *name == '-')
 		name++;
-#ifdef _WIN32
-	/* Unquoted Windows paths may contain spaces: C:\Program Files\... */
-	if ((ptr = parse_window_name_win32_end(name)) != NULL)
-		*ptr = '\0';
-	else
-#endif
 	if ((ptr = strchr(name, ' ')) != NULL)
 		*ptr = '\0';
+#endif
 
 	if (*name != '\0') {
 		ptr = name + strlen(name) - 1;
@@ -201,12 +300,14 @@ parse_window_name(const char *in)
 	}
 
 #ifdef _WIN32
-	if (*name == '/' || *name == '\\' ||
+	if (*name == '/' || strchr(name, '\\') != NULL ||
 	    (isalpha((u_char)name[0]) && name[1] == ':')) {
 		char *slash = strrchr(name, '/');
 		char *bslash = strrchr(name, '\\');
 		if (bslash != NULL && (slash == NULL || bslash > slash))
 			slash = bslash;
+		if (slash == NULL && name[1] == ':')
+			slash = name + 1;
 		if (slash != NULL && slash[1] != '\0')
 			name = slash + 1;
 	}
