@@ -246,19 +246,32 @@ ipc_own_integrity(void)
 /*
  * Build a security descriptor owned by and granting access only to the
  * current user. Free with LocalFree.
+ *
+ * An elevated process also labels it with its own integrity level so the
+ * same user's ordinary (medium integrity) processes can neither read nor
+ * write it: otherwise they could drive an elevated server and run commands
+ * as administrator. Objects created at high integrity are otherwise labelled
+ * medium.
  */
 static PSECURITY_DESCRIPTOR
 ipc_owner_only_sd(void)
 {
 	PSID			 sid;
 	char			*sid_str, *sddl;
+	const char		*label = "";
 	PSECURITY_DESCRIPTOR	 sd = NULL;
+	DWORD			 rid;
 
 	if ((sid = ipc_user_sid()) == NULL)
 		return (NULL);
 	if (!ConvertSidToStringSidA(sid, &sid_str))
 		return (NULL);
-	xasprintf(&sddl, "O:%sD:P(A;;GA;;;%s)", sid_str, sid_str);
+	rid = ipc_own_integrity();
+	if (rid >= SECURITY_MANDATORY_SYSTEM_RID)
+		label = "S:(ML;;NWNR;;;SI)";
+	else if (rid >= SECURITY_MANDATORY_HIGH_RID)
+		label = "S:(ML;;NWNR;;;HI)";
+	xasprintf(&sddl, "O:%sD:P(A;;GA;;;%s)%s", sid_str, sid_str, label);
 	LocalFree(sid_str);
 
 	if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl,
@@ -1157,7 +1170,8 @@ win32_ipc_connect(const char *label, const char *tty_token, int *status,
 				    label);
 			} else if (error == ERROR_ACCESS_DENIED) {
 				xasprintf(cause, "access to server %s denied "
-				    "(it may belong to another user)", label);
+				    "(it may belong to another user or run as "
+				    "administrator)", label);
 			} else {
 				msg = win32_ipc_strerror(error);
 				xasprintf(cause, "error connecting to %s (%s)",
