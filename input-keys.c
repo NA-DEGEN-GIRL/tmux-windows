@@ -427,7 +427,7 @@ input_key_extended(struct bufferevent *bev, key_code key)
 {
 	char		 tmp[64], modifier;
 	struct utf8_data ud;
-	wchar_t		 wc;
+	utf8_wchar	 wc;
 
 	switch (key & KEYC_MASK_MODIFIERS) {
 	case KEYC_SHIFT:
@@ -503,6 +503,17 @@ input_key_vt10x(struct bufferevent *bev, key_code key)
                 input_key_write(__func__, bev, ud.data, ud.size);
 		return (0);
 	}
+#ifdef _MSC_VER
+	/*
+	 * A key above 0x7f without packed UTF-8 data is a byte which was not
+	 * valid UTF-8. KEYC_IS_UNICODE is true for these elsewhere and they
+	 * expand to nothing; drop them here too rather than sending them with
+	 * the top bit cleared.
+	 */
+	if ((key & KEYC_MASK_TYPE) == KEYC_SHIFT_TYPE(KEYC_TYPE_UNICODE) &&
+	    (key & KEYC_MASK_KEY) > 0x7f)
+		return (0);
+#endif
 
 	/*
 	 * Prevent TAB, CR and LF from being swallowed by the C0 remapping

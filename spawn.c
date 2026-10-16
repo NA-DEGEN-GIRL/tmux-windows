@@ -618,6 +618,9 @@ struct spawn_editor_state {
 	pid_t			 pid;
 	spawn_finish_edit_cb	 cb;
 	void			*arg;
+#ifdef _WIN32
+	int			 crlf;
+#endif
 };
 
 static void
@@ -653,6 +656,9 @@ spawn_editor_finish(struct window_pane *wp)
 	char				*buf = NULL;
 	off_t				 len = 0;
 	int				 status = 128 + SIGHUP;
+#ifdef _WIN32
+	size_t				 done, n;
+#endif
 
 	if (es == NULL)
 		return;
@@ -675,6 +681,55 @@ spawn_editor_finish(struct window_pane *wp)
 		return;
 	}
 
+#ifdef _WIN32
+	/*
+	 * Read in binary mode and in a loop: text mode turns CRLF into LF (so
+	 * fewer bytes than the file size arrive and the single fread() threw
+	 * the edit away) and stops at a 0x1a byte.
+	 */
+	f = fopen(es->path, "rb");
+	if (f != NULL) {
+		if (fseeko(f, 0, SEEK_END) == 0) {
+			len = ftello(f);
+			if (len > 0 && (uintmax_t)len <= (uintmax_t)SIZE_MAX &&
+			    fseeko(f, 0, SEEK_SET) == 0 &&
+			    (buf = malloc(len)) != NULL) {
+				done = 0;
+				while (done < (size_t)len) {
+					n = fread(buf + done, 1, len - done, f);
+					if (n == 0)
+						break;
+					done += n;
+				}
+				if (ferror(f) || done == 0) {
+					free(buf);
+					buf = NULL;
+					len = 0;
+				} else
+					len = done;
+			} else
+				len = 0;
+		}
+		fclose(f);
+	}
+
+	/*
+	 * Windows editors usually save with CRLF line endings: turn them back
+	 * into LF so the buffer does not gain a CR on every line (which would
+	 * be pasted as an extra Enter). Only do this if the buffer had no CR
+	 * to begin with, so CRLF that was already there (text copied from a
+	 * Windows program) comes back unchanged.
+	 */
+	if (buf != NULL && !es->crlf) {
+		for (done = n = 0; n < (size_t)len; n++) {
+			if (buf[n] == '\r' && n + 1 < (size_t)len &&
+			    buf[n + 1] == '\n')
+				continue;
+			buf[done++] = buf[n];
+		}
+		len = done;
+	}
+#else
 	f = fopen(es->path, "r");
 	if (f != NULL) {
 		if (fseeko(f, 0, SEEK_END) == 0) {
@@ -694,6 +749,7 @@ spawn_editor_finish(struct window_pane *wp)
 		}
 		fclose(f);
 	}
+#endif
 
 	es->cb(buf, len, es->arg);
 	spawn_editor_free(es);
@@ -713,16 +769,35 @@ spawn_editor(struct client *c, const char *buf, size_t len,
 	struct environ			*env;
 	FILE				*f;
 	char				*cmd, *cause = NULL;
+#ifdef _WIN32
+	char				 tmpdir[MAX_PATH * 3], path[MAX_PATH * 3 + 16];
+	wchar_t				 wtmpdir[MAX_PATH + 1];
+	DWORD				 n;
+#else
 	char				 path[] = _PATH_TMP "tmux.XXXXXXXX";
+#endif
 	const char			*editor;
 	int				 fd;
 	u_int				 px, py, sx, sy;
 
 	editor = options_get_string(global_options, "editor");
+#ifdef _WIN32
+	/* Use the user's temporary directory (%TEMP%), as UTF-8. */
+	n = GetTempPathW(nitems(wtmpdir), wtmpdir);
+	if (n == 0 || n >= nitems(wtmpdir) ||
+	    WideCharToMultiByte(CP_UTF8, 0, wtmpdir, -1, tmpdir, sizeof tmpdir,
+	    NULL, NULL) == 0)
+		strlcpy(tmpdir, _PATH_TMP, sizeof tmpdir);
+	xsnprintf(path, sizeof path, "%stmux.XXXXXXXX", tmpdir);
+#endif
 	fd = mkstemp(path);
 	if (fd == -1)
 		return (NULL);
+#ifdef _WIN32
+	f = fdopen(fd, "wb");
+#else
 	f = fdopen(fd, "w");
+#endif
 	if (f == NULL) {
 		close(fd);
 		unlink(path);
@@ -739,6 +814,9 @@ spawn_editor(struct client *c, const char *buf, size_t len,
 	es->path = xstrdup(path);
 	es->cb = cb;
 	es->arg = arg;
+#ifdef _WIN32
+	es->crlf = (len != 0 && memchr(buf, '\r', len) != NULL);
+#endif
 
 	sx = w->sx * 9 / 10;
 	sy = w->sy * 9 / 10;
@@ -751,7 +829,11 @@ spawn_editor(struct client *c, const char *buf, size_t len,
 		return (NULL);
 	}
 
+#ifdef _WIN32
+	xasprintf(&cmd, "%s \"%s\"", editor, path);
+#else
 	xasprintf(&cmd, "%s %s", editor, path);
+#endif
 	env = environ_create();
 	sc.s = s;
 	sc.wl = wl;
@@ -762,7 +844,11 @@ spawn_editor(struct client *c, const char *buf, size_t len,
 	sc.argv = &cmd;
 	sc.environ = env;
 	sc.idx = -1;
+#ifdef _WIN32
+	sc.cwd = tmpdir;
+#else
 	sc.cwd = _PATH_TMP;
+#endif
 	sc.flags = SPAWN_FLOATING;
 
 	wp = spawn_pane(&sc, &cause);

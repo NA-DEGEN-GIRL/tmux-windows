@@ -789,16 +789,37 @@ win32_process_exec(const char *shell, const char *cmd)
 void
 win32_launch_server(const char *label)
 {
-	STARTUPINFOA si;
+	STARTUPINFOW si;
 	PROCESS_INFORMATION pi;
-	char exe[MAX_PATH];
-	char cmdline[MAX_PATH * 2];
+	wchar_t exe[MAX_PATH], *wlabel, *cmdline;
+	DWORD n;
+	int len;
+	size_t size;
+	BOOL ok;
 
-	if (GetModuleFileNameA(NULL, exe, sizeof exe) == 0)
+	/*
+	 * The label is UTF-8 (argv is UTF-8 on Windows), so use the wide
+	 * functions: with CreateProcessA a non-ASCII -S path reached the
+	 * server in the ANSI code page and the server listened somewhere the
+	 * client never looked.
+	 */
+	n = GetModuleFileNameW(NULL, exe, MAX_PATH);
+	if (n == 0 || n >= MAX_PATH)
 		return;
-
-	snprintf(cmdline, sizeof cmdline,
-	    "\"%s\" -D -S \"%s\"", exe, label);
+	len = MultiByteToWideChar(CP_UTF8, 0, label, -1, NULL, 0);
+	if (len <= 0)
+		return;
+	if ((wlabel = calloc(len, sizeof *wlabel)) == NULL)
+		return;
+	MultiByteToWideChar(CP_UTF8, 0, label, -1, wlabel, len);
+	size = wcslen(exe) + len + 16;
+	if ((cmdline = calloc(size, sizeof *cmdline)) == NULL) {
+		free(wlabel);
+		return;
+	}
+	_snwprintf_s(cmdline, size, _TRUNCATE, L"\"%ls\" -D -S \"%ls\"", exe,
+	    wlabel);
+	free(wlabel);
 
 	memset(&si, 0, sizeof si);
 	si.cb = sizeof si;
@@ -811,16 +832,17 @@ win32_launch_server(const char *label)
 	 * processes in the job. Fall back without the flag if the job
 	 * doesn't allow breakaway (ERROR_ACCESS_DENIED).
 	 */
-	if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
+	ok = CreateProcessW(NULL, cmdline, NULL, NULL, FALSE,
 	    DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB,
-	    NULL, NULL, &si, &pi)) {
-		if (GetLastError() != ERROR_ACCESS_DENIED)
-			return;
-		if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
+	    NULL, NULL, &si, &pi);
+	if (!ok && GetLastError() == ERROR_ACCESS_DENIED) {
+		ok = CreateProcessW(NULL, cmdline, NULL, NULL, FALSE,
 		    DETACHED_PROCESS | CREATE_NO_WINDOW, NULL, NULL,
-		    &si, &pi))
-			return;
+		    &si, &pi);
 	}
+	free(cmdline);
+	if (!ok)
+		return;
 
 	CloseHandle(pi.hThread);
 	CloseHandle(pi.hProcess);

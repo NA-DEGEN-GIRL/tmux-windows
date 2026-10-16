@@ -460,11 +460,23 @@ int		 systemd_create_socket(int, char **);
 int		 systemd_move_to_new_cgroup(char **);
 #endif
 
+/*
+ * A Unicode code point. MSVC's wchar_t is only 16 bits so cannot hold
+ * characters outside the Basic Multilingual Plane.
+ */
+#ifdef _WIN32
+typedef uint32_t utf8_wchar;
+#define UTF8_WCHAR_MAX 0x10ffff
+#else
+typedef wchar_t utf8_wchar;
+#define UTF8_WCHAR_MAX WCHAR_MAX
+#endif
+
 #ifdef HAVE_UTF8PROC
 /* utf8proc.c */
-int		 utf8proc_wcwidth(wchar_t);
-int		 utf8proc_mbtowc(wchar_t *, const char *, size_t);
-int		 utf8proc_wctomb(char *, wchar_t);
+int		 utf8proc_wcwidth(utf8_wchar);
+int		 utf8proc_mbtowc(utf8_wchar *, const char *, size_t);
+int		 utf8proc_wctomb(char *, utf8_wchar);
 #endif
 
 #ifdef NEED_FUZZING

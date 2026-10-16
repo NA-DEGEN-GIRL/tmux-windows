@@ -597,11 +597,7 @@ tty_term_create(struct tty *tty, char *name, char **caps, u_int ncaps,
 
 		offset = 0;
 		first = tty_term_override_next(s, &offset);
-#ifdef _WIN32
-		if (first != NULL && strstr(term->name, first) != NULL)
-#else
 		if (first != NULL && fnmatch(first, term->name, 0) == 0)
-#endif
 			tty_add_features(feat, s + offset, ":");
 		a = options_array_next(a);
 	}
@@ -633,6 +629,19 @@ tty_term_create(struct tty *tty, char *name, char **caps, u_int ncaps,
 	 * unconditionally enable these features.
 	 */
 	tty_add_features(feat, "256,RGB", ",");
+
+	/*
+	 * Windows Terminal does not answer XTVERSION, so recognise it (and
+	 * other terminals which set TERM_PROGRAM) from the environment.
+	 */
+	envent = environ_find(tty->client->environ, "TERM_PROGRAM");
+	if (envent != NULL && envent->value != NULL)
+		tty_default_features(feat, envent->value, 0);
+	if (environ_find(tty->client->environ, "WT_SESSION") != NULL) {
+		tty_add_features(feat, "bpaste,ccolour,clipboard,cstyle,focus,"
+		    "hyperlinks,mouse,overline,progressbar,strikethrough,sync,"
+		    "title,usstyle", ",");
+	}
 #endif
 
 	/* Apply overrides so any capabilities used for features are changed. */
@@ -917,8 +926,6 @@ tty_term_string_s(struct tty_term *term, enum tty_code_code code, const char *a)
 	s = tiparm_s(1, 1, x, a);
 #elif defined(HAVE_TIPARM)
 	s = tiparm(x, a);
-#elif defined(_WIN32)
-	s = tparm((char *)x, (intptr_t)a, 0, 0, 0, 0, 0, 0, 0, 0);
 #else
 	s = tparm((char *)x, (long)a, 0, 0, 0, 0, 0, 0, 0, 0);
 #endif
@@ -939,9 +946,6 @@ tty_term_string_ss(struct tty_term *term, enum tty_code_code code,
 	s = tiparm_s(2, 3, x, a, b);
 #elif defined(HAVE_TIPARM)
 	s = tiparm(x, a, b);
-#elif defined(_WIN32)
-	s = tparm((char *)x, (intptr_t)a, (intptr_t)b, 0, 0, 0, 0, 0, 0,
-	    0);
 #else
 	s = tparm((char *)x, (long)a, (long)b, 0, 0, 0, 0, 0, 0, 0);
 #endif

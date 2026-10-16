@@ -97,7 +97,8 @@ static const struct tty_feature tty_feature_clipboard = {
 static const char *tty_feature_hyperlinks_capabilities[] = {
 #if defined (__OpenBSD__) || (defined(NCURSES_VERSION_MAJOR) && \
 	(NCURSES_VERSION_MAJOR > 5 || \
-	(NCURSES_VERSION_MAJOR == 5 && NCURSES_VERSION_MINOR > 8)))
+	(NCURSES_VERSION_MAJOR == 5 && NCURSES_VERSION_MINOR > 8))) || \
+	defined(_WIN32)
 	"Hls=\\E]8;%?%p1%l%tid=%p1%s%;;%p2%s\\E\\\\",
 #endif
 	NULL
